@@ -28,4 +28,8 @@ class VideoMapper:
                 video_url = self.get_video(guid)
                 exercise["video_url"] = video_url
 
+<<<<<<< HEAD
         return plan
+=======
+        return plan
+>>>>>>> 770d60c74de508513819ef57d0ce9adb95070b21
