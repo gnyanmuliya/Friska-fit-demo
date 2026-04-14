@@ -15,6 +15,7 @@ from utils.constants import (
     FITNESS_LEVELS,
     GENDERS,
     LOCATIONS,
+    MEDICAL_CONDITIONS,
     PRIMARY_GOALS,
     SECONDARY_GOALS,
     UNIT_SYSTEMS,
@@ -99,10 +100,10 @@ def render_workout_generator_view() -> None:
         st.markdown("### Health & Medical")
         h1, h2 = st.columns(2)
         with h1:
-            medical_conditions = st.text_area(
+            medical_conditions = st.multiselect(
                 "Medical Conditions",
-                placeholder="e.g. Type 2 Diabetes, Hypertension (or 'None')",
-                height=90,
+                MEDICAL_CONDITIONS,
+                placeholder="Select medical conditions",
             )
         with h2:
             physical_limitations = st.text_area(
@@ -122,7 +123,6 @@ def render_workout_generator_view() -> None:
         day_names = DAY_ORDER[: int(days_per_week)]
         weight_kg = weight if "Metric" in unit_system else round(weight * 0.45359237, 1)
         height_cm = height if "Metric" in unit_system else round(height * 2.54, 1)
-        parsed_medical_conditions = [item.strip() for item in medical_conditions.split(",") if item.strip()]
         parsed_limitations = [item.strip() for item in physical_limitations.split(",") if item.strip()]
         parsed_avoidance = [item.strip() for item in specific_avoidance.split(",") if item.strip()]
         primary_body_region = target_body_parts[0] if target_body_parts else "Full Body"
@@ -141,7 +141,7 @@ def render_workout_generator_view() -> None:
             "target_body_parts": target_body_parts,
             "body_region": primary_body_region,
             "fitness_level": fitness_level,
-            "medical_conditions": parsed_medical_conditions or ["NONE"],
+            "medical_conditions": medical_conditions or ["NONE"],
             "physical_limitations": physical_limitations.strip() or "None",
             "specific_avoidance": specific_avoidance.strip() or "None",
             "session_duration": session_duration,

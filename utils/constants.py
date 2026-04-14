@@ -39,6 +39,29 @@ EQUIPMENT_LIST = [
     "Medicine Ball",
 ]
 DURATIONS = ["2 min", "5 min"]
+MEDICAL_CONDITIONS = [
+    "Hypertension",
+    "High Cholesterol / Dyslipidemia",
+    "Obesity / Overweight",
+    "Type 2 Diabetes",
+    "Prediabetes",
+    "Metabolic Syndrome",
+    "Coronary Artery Disease",
+    "Chronic Kidney Disease",
+    "Osteoarthritis",
+    "Osteoporosis",
+    "Depression / Anxiety",
+    "Hypothyroidism",
+    "Hyperthyroidism",
+    "Sleep Apnea",
+    "Fatty Liver Disease (NAFLD)",
+    "COPD",
+    "Heart Failure (Stable)",
+    "Sarcopenia",
+    "Chronic Low Back Pain",
+    "Cognitive Decline / Dementia",
+    "Cancer (Lifestyle-related / Post-treatment)",
+]
 LOCATIONS = ["Home", "Gym", "Outdoors"]
 UNIT_SYSTEMS = ["Metric (kg/cm)", "Imperial (lbs/in)"]
 GENDERS = ["Male", "Female", "Non-binary", "Prefer not to say"]

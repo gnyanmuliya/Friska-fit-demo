@@ -417,10 +417,24 @@ class WorkoutPlanner:
         if not numbers:
             return 1
         minutes = int(numbers[0])
+        if minutes <= 2: return 1
+        if minutes <= 5: return 2
         if minutes < 20: return 2
         if minutes < 40: return 4
         if minutes < 55: return 5
         return 6
+
+    @staticmethod
+    def is_short_session(duration_str: Optional[str]) -> bool:
+        if duration_str is None:
+            return False
+        raw = str(duration_str).strip()
+        if not raw or raw.lower() in ['none', 'nan', 'null']:
+            return False
+        numbers = re.findall(r'\d+', raw)
+        if not numbers:
+            return False
+        return int(numbers[0]) <= 5
 
 
 # ============ LAYER 4: SELECTION LAYER ============
@@ -1020,14 +1034,15 @@ def _workoutcomposer_build_day(
     if weekly_usage is None:
         weekly_usage = Counter()
     shadow_boxing_used = bool(params.get("shadow_boxing_used"))
+    compact_session = bool(params.get("compact_session"))
 
     plan = {
         "day_name": day_name,
         "workout_title": f"{day_type}",
         "difficulty_level": params.get("fitness_level", "beginner"),
-        "warmup_duration": "None" if is_minimal_plan else "5-7 mins",
+        "warmup_duration": "None" if (is_minimal_plan or compact_session) else "5-7 mins",
         "main_workout_category": day_type,
-        "cooldown_duration": "None" if is_minimal_plan else "5 mins",
+        "cooldown_duration": "None" if (is_minimal_plan or compact_session) else "5 mins",
         "warmup": [],
         "main_workout": [],
         "cooldown": [],
@@ -1036,9 +1051,9 @@ def _workoutcomposer_build_day(
 
     day_warmup_used: Set[str] = global_warmup_used if global_warmup_used is not None else set()
     day_cooldown_used: Set[str] = global_cooldown_used if global_cooldown_used is not None else set()
-    target_main = 1 if is_minimal_plan else max(5, min(8, int(params.get('max_main', 5))))
-    target_cooldown = 0 if is_minimal_plan else 3
-    target_warmup = 0 if is_minimal_plan else 3
+    target_main = 1 if is_minimal_plan else max(1, min(8, int(params.get('max_main', 5))))
+    target_cooldown = 0 if (is_minimal_plan or compact_session) else 3
+    target_warmup = 0 if (is_minimal_plan or compact_session) else 3
     day_focus = _current_day_focus(self._active_clinical_context)
 
     def _record_weekly_use(name: Any) -> None:
@@ -1341,7 +1356,7 @@ def _workoutcomposer_build_day(
                 if p_ex.get("equipment"):
                     plan[target_slot][-1]["equipment"] = p_ex["equipment"]
 
-    if is_minimal_plan:
+    if is_minimal_plan or compact_session:
         plan["warmup"] = []
         plan["cooldown"] = []
     else:
@@ -1484,6 +1499,7 @@ class FitnessPlanGeneratorTool:
                 filtered_df = df.copy()
 
             planner = WorkoutPlanner()
+            is_short_session = planner.is_short_session(session_raw) if has_duration_number else False
             sets, reps, rpe, rest = planner.get_volume_intensity(
                 profile.get('primary_goal', ''), profile.get('fitness_level', '')
             )
@@ -1494,10 +1510,11 @@ class FitnessPlanGeneratorTool:
                 "reps": reps,
                 "rpe": rpe,
                 "rest": rest,
-                "max_main": 1 if is_minimal_plan else max(5, min(7, count)),
+                "max_main": 1 if is_minimal_plan else max(1, min(7, count)),
                 "weight": profile.get('weight_kg', 70),
                 "fitness_level": profile.get("fitness_level", "beginner"),
                 "_profile": profile,
+                "compact_session": is_short_session,
             }
 
             # In FitnessPlanGeneratorTool.execute
