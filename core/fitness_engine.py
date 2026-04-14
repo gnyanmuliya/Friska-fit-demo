@@ -103,7 +103,7 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         normalized["bp"] = normalized["blood_pressure"]
 
     normalized.setdefault("fitness_level", "Beginner")
-    normalized.setdefault("session_duration", "30 min")
+    normalized.setdefault("session_duration", "5 min")
     normalized.setdefault("weight_kg", 70)
     return normalized
 
