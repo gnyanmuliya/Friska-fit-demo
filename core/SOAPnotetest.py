@@ -3,7 +3,7 @@ import json
 
 import streamlit as st
 
-from fitness import ClinicalExtractionTool, PrescriptionParserTool
+from core.fitness import ClinicalExtractionTool, PrescriptionParserTool
 
 
 st.set_page_config(page_title="Friska Coach | Clinical Intake", page_icon="PT", layout="wide")

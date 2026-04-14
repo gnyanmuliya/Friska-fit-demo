@@ -1,65 +1,31 @@
-from __future__ import annotations
-
-from typing import Dict, List
-
-from services.dataset_service import DatasetService
-from utils.text_normalizer import normalize_text
-
+import pandas as pd
 
 class VideoMapper:
-    def __init__(self) -> None:
-        self._video_df = DatasetService.load_video_dataset()
-        self._by_guid = self._build_guid_lookup()
-        self._by_name = self._build_name_lookup()
+    def __init__(self, csv_path="dataset/Exercise videos.csv"):
+        self.df = pd.read_csv(csv_path)
 
-    def _build_guid_lookup(self) -> Dict[str, dict]:
-        lookup: Dict[str, dict] = {}
-        for _, row in self._video_df.iterrows():
-            guid = str(row.get("guidid", "")).strip().lower()
-            if guid:
-                lookup[guid] = row.to_dict()
-        return lookup
+    def get_video(self, guid):
+        if not guid:
+            return None
 
-    def _build_name_lookup(self) -> Dict[str, dict]:
-        lookup: Dict[str, dict] = {}
-        for _, row in self._video_df.iterrows():
-            names = [
-                row.get("folder_name", ""),
-                row.get("video_name", ""),
-                row.get("exercise_name", ""),
-            ]
-            for value in names:
-                key = normalize_text(value)
-                if key and key not in lookup:
-                    lookup[key] = row.to_dict()
-        return lookup
+        row = self.df[self.df["guidid"] == guid]
+        if row.empty:
+            return None
 
-    def enrich_exercise(self, exercise: dict) -> dict:
-        if self._video_df.empty:
-            return exercise
+        return row.iloc[0]["video_url"]
 
-        guid_key = str(exercise.get("guidid", "")).strip().lower()
-        row = self._by_guid.get(guid_key)
-        if row is None:
-            name_key = normalize_text(exercise.get("name", ""))
-            row = self._by_name.get(name_key)
+    def enrich_plan(self, plan):
+        """
+        Adds video_url to each exercise in the plan using guidid
+        """
 
-        if row is None:
-            return exercise
+        for day in plan:
+            if "exercises" not in day:
+                continue
 
-        exercise["video_url"] = str(row.get("sas_video_path") or row.get("video_path") or "")
-        exercise["thumbnail_url"] = str(row.get("sas_image_path") or row.get("image_path") or "")
-        exercise["video_path"] = str(row.get("video_path") or "")
-        exercise["image_path"] = str(row.get("image_path") or "")
-        if not exercise.get("benefit"):
-            exercise["benefit"] = str(row.get("health_benefit") or "")
-        if not exercise.get("safety_cue"):
-            exercise["safety_cue"] = str(row.get("safety_cue") or "")
-        return exercise
+            for exercise in day["exercises"]:
+                guid = exercise.get("guidid") or exercise.get("guid")
+                video_url = self.get_video(guid)
+                exercise["video_url"] = video_url
 
-    def enrich_plan(self, plan: Dict[str, dict]) -> Dict[str, dict]:
-        for day_data in plan.values():
-            for section in ("warmup", "main_workout", "cooldown"):
-                items: List[dict] = day_data.get(section, [])
-                day_data[section] = [self.enrich_exercise(dict(item)) for item in items]
         return plan

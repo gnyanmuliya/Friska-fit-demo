@@ -38,7 +38,7 @@ EQUIPMENT_LIST = [
     "Foam Roller",
     "Medicine Ball",
 ]
-DURATIONS = ["10 min", "15 min", "20 min", "25 min", "30 min", "40 min", "50 min"]
+DURATIONS = ["2 min", "5 min"]
 LOCATIONS = ["Home", "Gym", "Outdoors"]
 UNIT_SYSTEMS = ["Metric (kg/cm)", "Imperial (lbs/in)"]
 GENDERS = ["Male", "Female", "Non-binary", "Prefer not to say"]
