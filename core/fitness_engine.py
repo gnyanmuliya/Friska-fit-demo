@@ -103,7 +103,7 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
         normalized["bp"] = normalized["blood_pressure"]
 
     normalized.setdefault("fitness_level", "Beginner")
-    normalized.setdefault("session_duration", "5 min")
+    normalized.setdefault("session_duration", "30 min")
     normalized.setdefault("weight_kg", 70)
     return normalized
 
@@ -134,7 +134,7 @@ def run_old_engine(profile: Dict[str, Any]) -> Dict[str, Any]:
 def generate_plan_local(profile: Dict[str, Any], *, enrich_video: bool = True) -> Dict[str, Any]:
     plan = run_old_engine(profile)
     if enrich_video:
-        return VideoMapper().enrich_plan(copy.deepcopy(plan))
+        return VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
     return plan
 
 
@@ -150,7 +150,7 @@ def validate_equivalence(profile: Dict[str, Any]) -> None:
 
 class FitnessEngine:
     def __init__(self) -> None:
-        self.video_mapper = VideoMapper()
+        self.video_mapper = VideoMapper(csv_path="dataset/Exercise videos.csv")
 
     def generate_plan(self, profile: Dict[str, Any]) -> Dict[str, dict]:
         return generate_plan_local(profile, enrich_video=True)
