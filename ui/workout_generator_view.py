@@ -16,6 +16,7 @@ from utils.constants import (
     GENDERS,
     LOCATIONS,
     MEDICAL_CONDITIONS,
+    PHYSICAL_LIMITATIONS,
     PRIMARY_GOALS,
     SECONDARY_GOALS,
     UNIT_SYSTEMS,
@@ -106,10 +107,10 @@ def render_workout_generator_view() -> None:
                 placeholder="Select medical conditions",
             )
         with h2:
-            physical_limitations = st.text_area(
+            physical_limitations = st.multiselect(
                 "Physical Limitations",
-                placeholder="e.g. Knee pain, Lower back issues (or 'None')",
-                height=90,
+                PHYSICAL_LIMITATIONS,
+                placeholder="Select physical limitations",
             )
         specific_avoidance = st.text_input(
             "Exercises / Movements to Avoid",
@@ -123,7 +124,7 @@ def render_workout_generator_view() -> None:
         day_names = DAY_ORDER[: int(days_per_week)]
         weight_kg = weight if "Metric" in unit_system else round(weight * 0.45359237, 1)
         height_cm = height if "Metric" in unit_system else round(height * 2.54, 1)
-        parsed_limitations = [item.strip() for item in physical_limitations.split(",") if item.strip()]
+        parsed_limitations = [item.strip() for item in physical_limitations if item.strip()]
         parsed_avoidance = [item.strip() for item in specific_avoidance.split(",") if item.strip()]
         primary_body_region = target_body_parts[0] if target_body_parts else "Full Body"
         restrictions = parsed_limitations + parsed_avoidance
@@ -142,7 +143,7 @@ def render_workout_generator_view() -> None:
             "body_region": primary_body_region,
             "fitness_level": fitness_level,
             "medical_conditions": medical_conditions or ["NONE"],
-            "physical_limitations": physical_limitations.strip() or "None",
+            "physical_limitations": ", ".join(parsed_limitations) if parsed_limitations else "None",
             "specific_avoidance": specific_avoidance.strip() or "None",
             "session_duration": session_duration,
             "location": workout_location,
