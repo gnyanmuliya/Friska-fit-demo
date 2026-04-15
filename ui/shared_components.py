@@ -97,12 +97,6 @@ def render_plan(plan: Dict[str, dict], json_download_name: str = "workout_plan.j
                     for exercise in exercises:
                         _render_exercise_card(exercise)
 
-                safety_notes = day_data.get("safety_notes", [])
-                if safety_notes:
-                    st.markdown("**Safety Notes**")
-                    for note in safety_notes:
-                        st.caption(f"- {note}")
-
     with raw_tab:
         final_json = json.dumps(plan, indent=2)
         st.code(final_json, language="json")
@@ -115,6 +109,7 @@ def render_plan(plan: Dict[str, dict], json_download_name: str = "workout_plan.j
 
 
 def _render_exercise_card(exercise: dict) -> None:
+    rpe_value = str(exercise.get("intensity_rpe", "N/A")).replace("RPE", "").strip()
     st.markdown(
         f"""
         <div class="exercise-card">
@@ -122,7 +117,7 @@ def _render_exercise_card(exercise: dict) -> None:
             <div class="exercise-meta">
                 Sets: {exercise.get("sets", "N/A")} |
                 Reps: {exercise.get("reps", "N/A")} |
-                RPE: {exercise.get("intensity_rpe", "N/A")} |
+                RPE: {rpe_value or "N/A"} |
                 Rest: {exercise.get("rest", "N/A")}
             </div>
             <div class="exercise-copy">{exercise.get("benefit", "No benefit listed.")}</div>
