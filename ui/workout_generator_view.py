@@ -163,4 +163,5 @@ def render_workout_generator_view() -> None:
         render_plan(
             st.session_state.generated_plan,
             json_download_name=build_download_name("workout_generator_plan"),
+            user_profile=st.session_state.workout_profile,
         )

@@ -50,7 +50,11 @@ def render_soap_testing_view() -> None:
 
         plan_tab, clinical_tab = st.tabs(["View Workout Plan", "Clinical Data"])
         with plan_tab:
-            render_plan(plan, json_download_name=build_download_name("soap_workout_plan"))
+            render_plan(
+                plan,
+                json_download_name=build_download_name("soap_workout_plan"),
+                user_profile=profile,
+            )
 
         with clinical_tab:
             st.subheader("Structured Vitals")
