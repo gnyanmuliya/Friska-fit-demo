@@ -15,25 +15,51 @@ def render_global_styles() -> None:
                 font-family: "Segoe UI", "Helvetica Neue", sans-serif;
             }
 
-            .hero-header {
-                background: linear-gradient(135deg, #0f2027 0%, #203a43 48%, #2c5364 100%);
+            [data-testid="stSidebar"] {
+                display: none;
+            }
+
+            .topbar {
+                background: linear-gradient(135deg, #12343b 0%, #1f5c69 52%, #3f8c7a 100%);
                 border-radius: 18px;
-                padding: 2.6rem 2rem;
-                margin-bottom: 1.8rem;
+                padding: 1.7rem 2rem;
+                margin-bottom: 1rem;
                 color: white;
                 box-shadow: 0 18px 40px rgba(15, 32, 39, 0.18);
             }
 
-            .hero-header h1 {
-                margin: 0 0 0.45rem;
+            .topbar-eyebrow {
+                margin: 0 0 0.35rem;
+                font-size: 0.82rem;
+                letter-spacing: 0.14em;
+                text-transform: uppercase;
+                opacity: 0.76;
+            }
+
+            .topbar h1 {
+                margin: 0;
                 font-size: 2.4rem;
                 letter-spacing: -0.04em;
             }
 
-            .hero-header p {
-                margin: 0;
-                font-size: 1.02rem;
-                opacity: 0.82;
+            div[role="radiogroup"] {
+                background: #eef6f4;
+                border: 1px solid #d3e6e1;
+                border-radius: 16px;
+                padding: 0.45rem;
+                gap: 0.5rem;
+                margin-bottom: 1.4rem;
+            }
+
+            div[role="radiogroup"] label {
+                background: transparent;
+                border-radius: 12px;
+                padding: 0.55rem 1rem;
+            }
+
+            div[role="radiogroup"] label:has(input:checked) {
+                background: linear-gradient(135deg, #12343b 0%, #2b6c7b 100%);
+                color: white;
             }
 
             .section-title {

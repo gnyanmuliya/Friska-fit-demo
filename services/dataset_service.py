@@ -25,6 +25,7 @@ class DatasetService:
             "Unique ID": "unique_id",
             "GuidId": "guidid",
             "Exercise Name": "exercise_name",
+            "Video Link": "video_url",
             "Age Suitability": "age_suitability",
             "Goal": "goal",
             "Primary Category": "primary_category",
@@ -91,18 +92,27 @@ class DatasetService:
         aliases = {
             "GuidId": "guidid",
             "folder_name": "folder_name",
+            "Video name": "video_name",
+            "Video Link": "video_url",
+            "Notification": "notification",
+            "Exercise Name": "exercise_name",
             "video_name": "video_name",
             "video_path": "video_path",
             "sas_video_path": "sas_video_path",
             "sas_image_path": "sas_image_path",
             "image_path": "image_path",
             "health_benefit": "health_benefit",
+            "Health benefit": "health_benefit",
             "safety_cue": "safety_cue",
+            "Safety cue": "safety_cue",
         }
         df = df.rename(columns=aliases)
         df = df.fillna("")
         if "exercise_name" not in df.columns:
-            df["exercise_name"] = df["folder_name"].apply(lambda value: str(value).replace("_", " "))
+            if "folder_name" in df.columns:
+                df["exercise_name"] = df["folder_name"].apply(lambda value: str(value).replace("_", " "))
+            else:
+                df["exercise_name"] = ""
         return df
 
     @staticmethod

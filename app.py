@@ -9,38 +9,31 @@ st.set_page_config(
     page_title="Friska AI Fitness",
     page_icon="PT",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 render_global_styles()
 
 st.markdown(
     """
-    <section class="hero-header">
-        <h1>Friska AI Fitness Ecosystem</h1>
-        <p>Single-page Streamlit demo for local workout generation and SOAP note testing.</p>
-    </section>
+    <header class="topbar">
+        <div>
+            <p class="topbar-eyebrow">Friska Wellness Demo</p>
+            <h1>Friska AI</h1>
+        </div>
+    </header>
     """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.markdown("## Demo Controls")
-    mode = st.radio(
-        "Select Mode",
-        ["Workout Generator", "SOAP Note Testing"],
-        horizontal=False,
-    )
-    st.markdown("---")
-    st.markdown("**Project Rules**")
-    st.caption(
-        "Local CSV only\n"
-        "\nNo API calls\n"
-        "\nNo tokens\n"
-        "\nVideo mapping from Exercise videos.csv"
-    )
+mode = st.radio(
+    "Menu",
+    ["Fitness Plan Generator", "SOAP Note Based Plan"],
+    horizontal=True,
+    label_visibility="collapsed",
+)
 
-if mode == "Workout Generator":
+if mode == "Fitness Plan Generator":
     render_workout_generator_view()
 else:
     render_soap_testing_view()

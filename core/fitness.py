@@ -3896,6 +3896,27 @@ class PrescriptionParserTool:
         enriched = {
             "name": matched_name,
             "unique_id": str(row.get("Unique ID", "N/A") if row is not None else ex.get("unique_id") or "N/A"),
+            "guidid": str(
+                ex.get("guidid")
+                or ex.get("guid_id")
+                or ex.get("gui_id")
+                or (row.get("GuidId", "") if row is not None else "")
+                or (row.get("guidid", "") if row is not None else "")
+            ).strip() or None,
+            "guid_id": str(
+                ex.get("guidid")
+                or ex.get("guid_id")
+                or ex.get("gui_id")
+                or (row.get("GuidId", "") if row is not None else "")
+                or (row.get("guidid", "") if row is not None else "")
+            ).strip() or None,
+            "gui_id": str(
+                ex.get("guidid")
+                or ex.get("guid_id")
+                or ex.get("gui_id")
+                or (row.get("GuidId", "") if row is not None else "")
+                or (row.get("guidid", "") if row is not None else "")
+            ).strip() or None,
             "sets": str(ex.get("sets") or ""),
             "reps": str(ex.get("reps") or ""),
             "category": category,
@@ -3933,9 +3954,20 @@ class PrescriptionParserTool:
         if not equipment_str and row is not None:
             equipment_str = str(row.get("Equipments", "")).strip()
 
+        guid = str(
+            ex.get("guidid")
+            or ex.get("guid_id")
+            or ex.get("gui_id")
+            or (row.get("GuidId", "") if row is not None else "")
+            or (row.get("guidid", "") if row is not None else "")
+        ).strip()
+
         result = {
             "name": name,
             "unique_id": str(ex.get("unique_id") or (row.get("Unique ID", "N/A") if row is not None else "N/A") or "N/A"),
+            "guidid": guid or None,
+            "guid_id": guid or None,
+            "gui_id": guid or None,
             "sets": str(ex.get("sets") or ""),
             "reps": str(ex.get("reps") or ""),
             "benefit": str(ex.get("benefit") or "General conditioning"),

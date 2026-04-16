@@ -10,7 +10,7 @@ from ui.shared_components import render_plan
 
 
 def render_soap_testing_view() -> None:
-    st.markdown("## SOAP Note Testing")
+    st.markdown("## SOAP Note Based Plan")
     st.caption("Paste a SOAP note or upload a PDF to parse clinical context and build a local workout plan.")
 
     if "soap_result" not in st.session_state:

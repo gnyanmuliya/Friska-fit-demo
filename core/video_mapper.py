@@ -10,8 +10,13 @@ class VideoMapper:
         self.df = self.df.rename(
             columns={
                 "GuidId": "guidid",
+                "Video Link": "video_url",
                 "sas_video_path": "video_url",
                 "sas_image_path": "thumbnail_url",
+                "Notification": "notification",
+                "Exercise Name": "exercise_name",
+                "Health benefit": "health_benefit",
+                "Safety cue": "safety_cue",
             }
         ).fillna("")
 
