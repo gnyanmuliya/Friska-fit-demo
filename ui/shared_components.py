@@ -11,6 +11,22 @@ def render_global_styles() -> None:
     st.markdown(
         """
         <style>
+            :root {
+                --panel-bg-light: #eef6f4;
+                --panel-border-light: #cfe1dc;
+                --panel-text-light: #1f3440;
+                --panel-muted-light: #5b7280;
+                --panel-bg-dark: #14232a;
+                --panel-border-dark: #29414a;
+                --panel-text-dark: #eef7f5;
+                --panel-muted-dark: #c4d6d1;
+                --toggle-active-bg: linear-gradient(135deg, #0f596b 0%, #1f7a8c 100%);
+                --toggle-active-text: #f7fcff;
+                --toggle-active-border: #49b3c8;
+                --toggle-hover-light: #dfeee9;
+                --toggle-hover-dark: #1d3138;
+            }
+
             html, body, [class*="css"] {
                 font-family: "Segoe UI", "Helvetica Neue", sans-serif;
             }
@@ -43,8 +59,8 @@ def render_global_styles() -> None:
             }
 
             div[role="radiogroup"] {
-                background: #eef6f4;
-                border: 1px solid #d3e6e1;
+                background: var(--panel-bg-light);
+                border: 1px solid var(--panel-border-light);
                 border-radius: 16px;
                 padding: 0.45rem;
                 gap: 0.5rem;
@@ -53,13 +69,35 @@ def render_global_styles() -> None:
 
             div[role="radiogroup"] label {
                 background: transparent;
+                border: 1px solid transparent;
                 border-radius: 12px;
                 padding: 0.55rem 1rem;
+                color: var(--panel-text-light) !important;
+                transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+            }
+
+            div[role="radiogroup"] label:hover {
+                background: var(--toggle-hover-light);
             }
 
             div[role="radiogroup"] label:has(input:checked) {
-                background: linear-gradient(135deg, #12343b 0%, #2b6c7b 100%);
-                color: white;
+                background: var(--toggle-active-bg);
+                border-color: var(--toggle-active-border);
+                box-shadow: 0 8px 18px rgba(15, 89, 107, 0.22);
+                color: var(--toggle-active-text) !important;
+            }
+
+            div[role="radiogroup"] label:has(input:checked) p,
+            div[role="radiogroup"] label:has(input:checked) span,
+            div[role="radiogroup"] label:has(input:checked) div {
+                color: var(--toggle-active-text) !important;
+                font-weight: 600;
+            }
+
+            div[role="radiogroup"] label p,
+            div[role="radiogroup"] label span,
+            div[role="radiogroup"] label div {
+                color: inherit !important;
             }
 
             .section-title {
@@ -96,6 +134,25 @@ def render_global_styles() -> None:
                 font-size: 0.9rem;
                 color: #2f4854;
                 line-height: 1.55;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                div[role="radiogroup"] {
+                    background: var(--panel-bg-dark);
+                    border-color: var(--panel-border-dark);
+                }
+
+                div[role="radiogroup"] label {
+                    color: var(--panel-text-dark) !important;
+                }
+
+                div[role="radiogroup"] label:hover {
+                    background: var(--toggle-hover-dark);
+                }
+
+                div[role="radiogroup"] label:not(:has(input:checked)) {
+                    color: var(--panel-muted-dark) !important;
+                }
             }
         </style>
         """,
