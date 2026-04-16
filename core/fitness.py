@@ -4554,9 +4554,14 @@ class PrescriptionParserTool:
         reps = str(row.get("Reps", "") or (
             "10-15 reps" if section == "warmup" else ("Hold 30s" if section == "cooldown" else "8-12")))
         clinical_context = self._active_clinical_context or {}
+        guid = str(row.get("GuidId", "") or row.get("guidid", "")).strip()
         return {
             "name": str(row.get("Exercise Name", "")),
+            "exercise_name": str(row.get("Exercise Name", "")),
             "unique_id": str(row.get("Unique ID", "N/A") or "N/A"),
+            "guidid": guid if guid and guid.lower() != "none" else None,
+            "guid_id": guid if guid and guid.lower() != "none" else None,
+            "gui_id": guid if guid and guid.lower() != "none" else None,
             "sets": sets, "reps": reps,
             "benefit": str(row.get("Health benefit", "") or "General conditioning"),
             "steps": [s.strip() for s in str(row.get("Steps to perform", "")).splitlines() if s.strip()],
