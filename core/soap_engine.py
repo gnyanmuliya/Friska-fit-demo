@@ -19,7 +19,8 @@ from services.dataset_service import DatasetService
 from utils.constants import DAY_ORDER
 from utils.text_normalizer import normalize_text
 
-
+from dotenv import load_dotenv
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -319,6 +320,9 @@ class SoapEngine:
             return self._ai_client
         try:
             from openai import AzureOpenAI
+            from dotenv import load_dotenv
+            load_dotenv()
+            logger = logging.getLogger(__name__)
             api_key = os.getenv("AZURE_AI_KEY")
             endpoint = "https://nouriqfriskacc7470931625.cognitiveservices.azure.com/"
             api_version = "2024-12-01-preview"
