@@ -1,21 +1,5 @@
-import asyncio
-from core.SOAPnotetest import ClinicalExtractionTool, PrescriptionParserTool
+from core.soap_engine import SoapEngine
 
 def process_soap_note(text: str):
-    tool = ClinicalExtractionTool()
-
-    extracted = tool.parse_sections(text)
-
-    parser = PrescriptionParserTool()
-
-    result = asyncio.run(
-        parser.execute(
-            text,
-            {
-                "age": 49,
-                "primary_goal": "Recovery"
-            }
-        )
-    )
-
-    return result
+    engine = SoapEngine()
+    return engine.generate_plan_from_text(text)

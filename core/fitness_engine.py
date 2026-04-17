@@ -15,6 +15,7 @@ from core.video_mapper import VideoMapper
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_PATH = PROJECT_ROOT / "dataset" / "fitness.csv"
+SOAP_DATASET_PATH = PROJECT_ROOT / "dataset" / "soap_data.csv"
 
 
 legacy_fitness.BASE_DIR = str(PROJECT_ROOT)
@@ -87,9 +88,12 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not normalized.get("goal") and normalized.get("primary_goal"):
         normalized["goal"] = normalized["primary_goal"]
 
-    days = normalized.get("days_per_week") or normalized.get("days")
-    if isinstance(days, list) and days:
-        normalized["days_per_week"] = days
+    explicit_days = normalized.get("days")
+    requested_days = normalized.get("days_per_week")
+    if isinstance(explicit_days, list) and explicit_days:
+        normalized["days_per_week"] = explicit_days
+    elif isinstance(requested_days, list) and requested_days:
+        normalized["days_per_week"] = requested_days
     else:
         weekly_days = int(normalized.get("weekly_days") or 3)
         normalized["days_per_week"] = legacy_fitness._DAY_ORDER[: max(1, min(weekly_days, len(legacy_fitness._DAY_ORDER)))]
@@ -129,6 +133,18 @@ def run_old_engine(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not result.success:
         raise RuntimeError(result.error or "Legacy fitness engine failed.")
     return result.data.get("plans_json") or result.data.get("json_plan") or {}
+
+
+def generate_plan_local_from_dataset(profile: Dict[str, Any], dataset_path: str, *, enrich_video: bool = True) -> Dict[str, Any]:
+    old_paths = list(legacy_fitness.FitnessDataset.POSSIBLE_PATHS)
+    legacy_fitness.FitnessDataset.POSSIBLE_PATHS = [dataset_path] + old_paths
+    try:
+        plan = run_old_engine(profile)
+    finally:
+        legacy_fitness.FitnessDataset.POSSIBLE_PATHS = old_paths
+    if enrich_video:
+        return VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
+    return plan
 
 
 def generate_plan_local(profile: Dict[str, Any], *, enrich_video: bool = True) -> Dict[str, Any]:

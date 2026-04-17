@@ -1,0 +1,9 @@
+fitness rows=122
+soap rows=0
+history=: Patient reports knee pain.
+findings=: Patient has high blood pressure.
+exercise_session=: Squat, lunge.
+vitals={'Weight': 'N/A', 'BP': 'N/A', 'BMI': 'N/A'}
+prescribed_exercises=[]
+plan_keys=['parsed', 'plan', 'profile']
+plan_nonempty=True

@@ -709,9 +709,24 @@ _DAY_FOCUS_CYCLE = [
     "Full Body",
 ]
 
+_DAY_NAME_FOCUS_MAP = {
+    "Monday": "Upper Focus",
+    "Tuesday": "Lower Focus",
+    "Wednesday": "Cardio Focus",
+    "Thursday": "Core Focus",
+    "Friday": "Full Body",
+    "Saturday": "Cardio Focus",
+    "Sunday": "Mobility Focus",
+}
+
 
 def _current_day_focus(clinical_context: Optional[Dict[str, Any]]) -> str:
     ctx = clinical_context or {}
+    day_name = str(ctx.get("day_name") or "").strip()
+    if day_name:
+        mapped_focus = _DAY_NAME_FOCUS_MAP.get(day_name)
+        if mapped_focus:
+            return mapped_focus
     day_index = int(ctx.get("day_index", 0) or 0)
     return _DAY_FOCUS_CYCLE[day_index % len(_DAY_FOCUS_CYCLE)]
 
@@ -1482,8 +1497,12 @@ class FitnessPlanGeneratorTool:
             if not profile:
                 return ToolResult(False, error="No user profile provided.")
 
-            if not profile.get('days_per_week'):
-                profile['days_per_week'] = ["Monday", "Wednesday", "Friday"]
+            explicit_days = [d for d in (profile.get("days") or []) if d in _DAY_ORDER]
+            if explicit_days:
+                profile["days_per_week"] = explicit_days
+            elif not profile.get('days_per_week'):
+                weekly_days = self._to_int(profile.get("weekly_days")) or 3
+                profile['days_per_week'] = _DAY_ORDER[:max(1, min(weekly_days, len(_DAY_ORDER)))]
 
             df = FitnessDataset.load()
             if df.empty:
@@ -1550,6 +1569,7 @@ class FitnessPlanGeneratorTool:
             if parsed_mode == "session":
                 day = "Monday"
                 composer._active_clinical_context["day_index"] = 0
+                composer._active_clinical_context["day_name"] = day
                 day_mods = (parsed_output.get("day_mods") or {}).get(day) or []
                 day_type = "/".join(day_mods) if day_mods else str(parsed_output.get("day_type") or "Session")
                 mandatory_payload = parsed_output.get("mandatory") or {}
@@ -1598,6 +1618,7 @@ class FitnessPlanGeneratorTool:
                         day_params["weekly_usage"] = weekly_usage
                         day_params["shadow_boxing_used"] = shadow_boxing_used
                         composer._active_clinical_context["day_index"] = i
+                        composer._active_clinical_context["day_name"] = d
                         plans_json[d] = composer.build_day(
                             d, day_type, filtered_df, tagged_pools, day_params,
                             global_main_used,
@@ -1622,6 +1643,7 @@ class FitnessPlanGeneratorTool:
                         day_params["weekly_usage"] = weekly_usage
                         day_params["shadow_boxing_used"] = shadow_boxing_used
                         composer._active_clinical_context["day_index"] = i
+                        composer._active_clinical_context["day_name"] = day
                         plans_json[day] = composer.build_day(
                             day, day_type, filtered_df, tagged_pools, day_params,
                             global_main_used,
@@ -2929,10 +2951,11 @@ class PrescriptionParserTool:
 
         homework_exercises = list(ex.get("homework_exercises") or [])
         day_mods = self._resolve_day_mods(ex, mode)
+        explicit_schedule = bool((ex.get("schedule") or {}).get("explicit_days"))
         day_mods = RuleEnforcer.enforce_frequency(
             day_mods=day_mods,
             rules=rule_pack,
-            sample_week_exists=bool(sample_map),
+            sample_week_exists=bool(sample_map) or explicit_schedule,
         )
         mandatory = self._resolve_mandatory(
             ex, day_mods, mode, structured_sections,
@@ -3058,6 +3081,18 @@ class PrescriptionParserTool:
                 "is_daily_homework": bool(src.get("is_daily_homework", False)),
             }
 
+        def _target_day_for_entry(src: Dict[str, Any], mod: Optional[str], candidates: List[str]) -> str:
+            explicit_day = self._normalise_day(
+                src.get("day") or src.get("day_name") or src.get("assigned_day")
+            )
+            if explicit_day and explicit_day in candidates:
+                return explicit_day
+            if mod:
+                mod_targets = [d for d in candidates if mod in (day_mods.get(d) or [])]
+                if mod_targets:
+                    return mod_targets[0]
+            return candidates[0] if candidates else "Monday"
+
         active_days = [d for d in _DAY_ORDER if day_mods.get(d) and "Rest" not in day_mods[d]]
         resistance_days = [d for d in active_days if any(
             m in ("Resistance", "Upper", "Lower", "HIIT") for m in day_mods.get(d, [])
@@ -3074,9 +3109,7 @@ class PrescriptionParserTool:
                 if not entry["name"]: continue
                 if self._is_modality_phrase(entry["name"]): continue
                 mod = self._parse_mod(str(src.get("modality") or "")) or self._infer_modality(src.get("name", ""))
-                targets = [d for d in active_days if mod and mod in (day_mods.get(d) or [])]
-                if not targets: targets = active_days
-                day = targets[0] if targets else "Monday"
+                day = _target_day_for_entry(src, mod, active_days)
                 if not any(m.get("name", "").lower() == entry["name"].lower() for m in mandatory[day]):
                     mandatory[day].append(entry)
 
@@ -3141,11 +3174,7 @@ class PrescriptionParserTool:
             entry = _to_entry(src)
             if self._is_modality_phrase(entry["name"]): continue
             mod = self._parse_mod(str(src.get("modality") or "")) or self._infer_modality(src.get("name", ""))
-            targets = [d for d in _DAY_ORDER
-                       if mod and mod in (day_mods.get(d) or [])
-                       and "Rest" not in (day_mods.get(d) or [])]
-            if not targets: targets = active_days
-            day = targets[0] if targets else "Monday"
+            day = _target_day_for_entry(src, mod, active_days)
             if not any(m.get("name") == entry["name"] for m in mandatory[day]):
                 mandatory[day].append(entry)
 
@@ -3164,6 +3193,15 @@ class PrescriptionParserTool:
     def _build_clinical_context(self, resolved: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
         extract = resolved.get("extract") or {}
         profile_attrs = extract.get("profile_attributes") or {}
+        explicit_days = [
+            day for day in _DAY_ORDER
+            if (resolved.get("day_mods") or {}).get(day)
+        ]
+        profile_days = [
+            day for day in (profile.get("days") or profile.get("days_per_week") or [])
+            if day in _DAY_ORDER
+        ]
+        plan_days = explicit_days or profile_days
         conditions: List[str] = []
         for items in (profile.get("medical_conditions") or [], profile_attrs.get("injuries") or []):
             for item in items:
@@ -3186,6 +3224,10 @@ class PrescriptionParserTool:
         return {
             "conditions": sorted(set(c.lower() for c in conditions if c)),
             "note_text": note_text,
+            "days": plan_days,
+            "explicit_days": explicit_days,
+            "day_name": None,
+            "day_index": 0,
             "flags": {
                 "knee_sensitive": _has(r"\bknee\b|\bacl\b|\bmeniscus\b|\bpatella\b|\bbruise[ds]?\b"),
                 "avoid_floor_work": _has(
@@ -3446,10 +3488,53 @@ class PrescriptionParserTool:
             match = re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
             return float(match.group(1)) if match else default
 
+    def _resolve_plan_days(
+        self,
+        profile: Dict[str, Any],
+        day_mods: Dict[str, List[str]],
+        clinical_context: Dict[str, Any],
+    ) -> List[str]:
+        explicit_days = [day for day in (clinical_context.get("explicit_days") or []) if day in _DAY_ORDER]
+        if explicit_days:
+            return explicit_days
+
+        profile_days = [
+            day for day in (profile.get("days") or profile.get("days_per_week") or [])
+            if day in _DAY_ORDER
+        ]
+        if profile_days:
+            return profile_days
+
+        active_days = [
+            day for day in _DAY_ORDER
+            if (day_mods.get(day) or []) and "Rest" not in (day_mods.get(day) or [])
+        ]
+        if active_days:
+            return active_days
+
+        weekly_days = self._to_int(profile.get("weekly_days")) or 3
+        weekly_days = max(1, min(7, weekly_days))
+        return list(_DAY_ORDER[:weekly_days])
+
+    def _with_day_clinical_context(
+        self,
+        clinical_context: Dict[str, Any],
+        day_name: str,
+        day_index: int,
+        plan_days: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        ctx = dict(clinical_context or {})
+        ctx["day_name"] = day_name
+        ctx["day_index"] = day_index
+        if plan_days is not None:
+            ctx["days"] = list(plan_days)
+        return ctx
+
     def _expand_to_full_week(self, day_mods: Dict[str, List[str]], profile: Dict[str, Any], clinical_context: Dict[str, Any]) -> Dict[str, List[str]]:
         out = {day: list(day_mods.get(day) or []) for day in _DAY_ORDER}
         goal = str(profile.get("primary_goal") or "").lower()
         flags = clinical_context.get("flags") or {}
+        active_days = self._resolve_plan_days(profile, day_mods, clinical_context)
 
         if "diabetes" in goal:
             template = [
@@ -3476,7 +3561,7 @@ class PrescriptionParserTool:
             template[0] = ["Cardio"]
             template[4] = ["Mobility"]
 
-        for idx, day in enumerate(_DAY_ORDER):
+        for idx, day in enumerate(active_days):
             if not out.get(day):
                 out[day] = list(template[idx])
         return out
@@ -3499,6 +3584,8 @@ class PrescriptionParserTool:
         mandatory = resolved["mandatory"]
         mode      = resolved["mode"]
         extract   = resolved["extract"]
+        plan_days = self._resolve_plan_days(profile, day_mods, clinical_context)
+        clinical_context["days"] = list(plan_days)
 
         plans: Dict[str, Any] = {}
         global_main_used:     Set[str] = set()
@@ -3523,7 +3610,7 @@ class PrescriptionParserTool:
                 global_exercise_used.add(n)
 
         resistance_days = [
-            d for d in _DAY_ORDER
+            d for d in plan_days
             if any(m in ("Resistance", "Upper", "Lower", "HIIT") for m in (day_mods.get(d) or []))
             and "Rest" not in (day_mods.get(d) or [])
         ]
@@ -3537,7 +3624,7 @@ class PrescriptionParserTool:
         # ── Cap prescribed exercise repetition: max 2-3 days per exercise ──
         # Count how many active days exist, then distribute prescribed exercises
         # so no single exercise appears on more than MAX_PRESCRIBED_DAYS days.
-        _active_days = [d for d in _DAY_ORDER if enriched_mandatory_map.get(d)]
+        _active_days = [d for d in plan_days if enriched_mandatory_map.get(d)]
         _MAX_DAYS = min(3, max(2, len(_active_days) // 2))
 
         # Count how many days each main exercise appears across the week
@@ -3573,9 +3660,10 @@ class PrescriptionParserTool:
                     _ex_kept[_name_key] += 1
             enriched_mandatory_map[_d] = filtered
 
-        for day in _DAY_ORDER:
+        for i, day in enumerate(plan_days):
             mods = day_mods.get(day) or []
             if not mods: continue
+            day_context = self._with_day_clinical_context(clinical_context, day, i, plan_days)
 
             if "Rest" in mods:
                 plans[day] = {
@@ -3606,7 +3694,7 @@ class PrescriptionParserTool:
                     pool = yoga_pool if not yoga_pool.empty else df
                 else:
                     pool = df
-            pool = self._apply_medical_guardrails(pool, clinical_context, "main")
+            pool = self._apply_medical_guardrails(pool, day_context, "main")
             pool = self._filter_used_exercises(pool, used_exercise_log, max_uses=3)
             pool = DatasetRanker.rank(pool, profile, modality=primary_mod, target_slot="main")
 
@@ -3624,8 +3712,8 @@ class PrescriptionParserTool:
                 df_tagged_cooldown = df[
                     df["Tags"].str.contains(r"cool\s*down|stretch", case=False, na=False, regex=True)
                 ]
-            df_tagged_warmup = self._apply_medical_guardrails(df_tagged_warmup, clinical_context, "warmup")
-            df_tagged_cooldown = self._apply_medical_guardrails(df_tagged_cooldown, clinical_context, "cooldown")
+            df_tagged_warmup = self._apply_medical_guardrails(df_tagged_warmup, day_context, "warmup")
+            df_tagged_cooldown = self._apply_medical_guardrails(df_tagged_cooldown, day_context, "cooldown")
             df_tagged_warmup = self._filter_used_exercises(df_tagged_warmup, used_exercise_log, max_uses=3)
             df_tagged_cooldown = self._filter_used_exercises(df_tagged_cooldown, used_exercise_log, max_uses=3)
             df_tagged_warmup   = DatasetRanker.rank(df_tagged_warmup, profile, modality=primary_mod, target_slot="warmup")
@@ -3758,7 +3846,7 @@ class PrescriptionParserTool:
             day_seed = sum((i + 1) * ord(ch) for i, ch in enumerate(day))
             day_composer = WorkoutComposer(ExerciseSelector(random_seed=day_seed))
             day_composer._dataset = self._dataset
-            day_composer._active_clinical_context = clinical_context
+            day_composer._active_clinical_context = day_context
 
             circuit_sets = resolved.get("circuit_sets", "")
             circuit_reps = resolved.get("circuit_reps", "")
@@ -3828,7 +3916,7 @@ class PrescriptionParserTool:
                 profile=profile,
                 pool=pool,
                 modality=primary_mod,
-                clinical_context=clinical_context,
+                clinical_context=day_context,
                 week_counts=weekly_usage_counts,
             )
             day_frequency_counter: Set[str] = set()
@@ -3845,16 +3933,17 @@ class PrescriptionParserTool:
                 "warmup": [], "main_workout": [], "cooldown": [],
                 "safety_notes": ["No scheduled days found — fallback plan."],
             }}
-        for day in _DAY_ORDER:
-            if day not in plans:
-                plans[day] = {
-                    "day_name": day,
-                    "main_workout_category": "Rest Day",
-                    "warmup": [],
-                    "main_workout": [],
-                    "cooldown": [],
-                    "safety_notes": ["Recovery day to support the weekly prescription."],
-                }
+        if not clinical_context.get("explicit_days"):
+            for day in _DAY_ORDER:
+                if day not in plans:
+                    plans[day] = {
+                        "day_name": day,
+                        "main_workout_category": "Rest Day",
+                        "warmup": [],
+                        "main_workout": [],
+                        "cooldown": [],
+                        "safety_notes": ["Recovery day to support the weekly prescription."],
+                    }
         return plans
 
 

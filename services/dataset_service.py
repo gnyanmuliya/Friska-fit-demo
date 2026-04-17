@@ -12,6 +12,7 @@ from utils.text_normalizer import normalize_text
 class DatasetService:
     FITNESS_FILE = DATASET_DIR / "fitness.csv"
     VIDEO_FILE = DATASET_DIR / "Exercise videos.csv"
+    SOAP_FILE = DATASET_DIR / "soap_data.csv"
 
     @classmethod
     @lru_cache(maxsize=1)
@@ -79,6 +80,79 @@ class DatasetService:
         df["tags"] = df["tags"].apply(cls._normalize_tags)
         df["goal"] = df["goal"].replace("", "All")
         df["fitness_level"] = df["fitness_level"].replace("", "Beginner")
+        return df
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def load_soap_dataset(cls) -> pd.DataFrame:
+        if not cls.SOAP_FILE.exists():
+            return pd.DataFrame()
+
+        try:
+            df = pd.read_csv(cls.SOAP_FILE)
+        except Exception:
+            return pd.DataFrame()
+
+        df.columns = [str(col).strip() for col in df.columns]
+        aliases = {
+            "Unique ID": "unique_id",
+            "GuidId": "guidid",
+            "Exercise Name": "exercise_name",
+            "Video name": "video_name",
+            "Video Link": "video_url",
+            "Age Suitability": "age_suitability",
+            "Goal": "goal",
+            "Primary Category": "primary_category",
+            "Body Region": "body_region",
+            "Equipments": "equipments",
+            "Fitness Level": "fitness_level",
+            "Physical limitation": "physical_limitations",
+            "Physical limitations": "physical_limitations",
+            "Sets": "sets",
+            "Reps": "reps",
+            "RPE": "rpe",
+            "Rest": "rest",
+            "Rest intervals": "rest_intervals",
+            "Health benefit": "health_benefit",
+            "Steps to perform": "steps_to_perform",
+            "Safety cue": "safety_cue",
+            "MET value": "met_value",
+            "is_not_suitable_for": "is_not_suitable_for",
+            "Tags": "tags",
+        }
+        df = df.rename(columns=aliases)
+
+        required_columns = [
+            "unique_id",
+            "guidid",
+            "exercise_name",
+            "age_suitability",
+            "goal",
+            "primary_category",
+            "body_region",
+            "equipments",
+            "fitness_level",
+            "physical_limitations",
+            "sets",
+            "reps",
+            "rpe",
+            "rest",
+            "rest_intervals",
+            "health_benefit",
+            "steps_to_perform",
+            "safety_cue",
+            "met_value",
+            "is_not_suitable_for",
+            "tags",
+            "video_name",
+            "video_url",
+        ]
+        for column in required_columns:
+            if column not in df.columns:
+                df[column] = ""
+
+        df = df.fillna("")
+        df["tags"] = df["tags"].apply(cls._normalize_tags)
         return df
 
     @classmethod
