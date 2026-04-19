@@ -283,10 +283,23 @@ def _render_exercise_card(exercise: dict, user_profile: Optional[Dict[str, Any]]
             st.caption(f"Equipment: {exercise['equipment']}")
         if exercise.get("safety_cue"):
             st.caption(f"Safety cue: {exercise['safety_cue']}")
-        if exercise.get("steps"):
+        
+        # Handle both "steps" (list) and "steps_to_perform" (string) formats
+        steps_data = exercise.get("steps") or exercise.get("steps_to_perform")
+        if steps_data:
             with st.expander("Steps to perform"):
-                for step in exercise["steps"]:
-                    st.write(f"- {step}")
+                if isinstance(steps_data, list):
+                    for step in steps_data:
+                        st.write(f"- {step}")
+                else:
+                    # If it's a string, split by newlines or display as-is
+                    step_text = str(steps_data).strip()
+                    if "\n" in step_text:
+                        for line in step_text.split("\n"):
+                            if line.strip():
+                                st.write(line.strip())
+                    else:
+                        st.write(step_text)
 
     with cols[1]:
         if exercise.get("video_url"):

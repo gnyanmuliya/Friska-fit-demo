@@ -7,12 +7,14 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
+
 try:
     import pdfplumber
 except ModuleNotFoundError:  # pragma: no cover - optional at runtime
     pdfplumber = None
 
-from core.fitness import ClinicalExtractionTool, PrescriptionParserTool
+from core.fitness import ClinicalExtractionTool, PrescriptionParserTool, FitnessPlanGeneratorTool
 from core.fitness_engine import generate_plan_local
 from core.models import SoapParseResult
 from services.dataset_service import DatasetService
@@ -85,22 +87,6 @@ class SoapEngine:
         expected_days = profile.get("weekly_days", 3)
         logger.info(f"[SoapEngine] Expected days: {expected_days}, Profile days: {profile.get('days', [])}")
 
-        # Force full plan mode
-        profile["is_minimal_plan"] = False
-        profile["structured_mode"] = True
-        profile["force_full_week"] = True
-
-        # Ensure correct day iteration
-        profile["structured_days"] = [
-            {
-                "day_index": i,
-                "day_name": day,
-                "day_type": profile.get("day_focus_map", {}).get(day, "General")
-            }
-            for i, day in enumerate(profile["days"])
-        ]
-
-        # Ensure the build process is resilient to invalid profiles
         if profile.get("weekly_days", 0) <= 0 or not profile.get("days"):
             logger.warning("Profile weekly_days invalid or missing days, enforcing safe fallback.")
             profile["weekly_days"] = 3
@@ -110,10 +96,9 @@ class SoapEngine:
                 for i, day in enumerate(profile["days"])
             ]
 
-        # Debug logs
         logger.info(f"FINAL PROFILE DAYS: {profile['days']}")
         logger.info(f"FINAL WEEKLY DAYS USED: {profile['weekly_days']}")
-        logger.info(f"STRUCTURED DAYS: {profile['structured_days']}")
+        logger.info(f"STRUCTURED DAYS: {profile.get('structured_days', [])}")
 
         if self.USE_PARSER_TOOL:
             prescription_narrative = self._build_prescription_narrative(parsed)
@@ -126,15 +111,268 @@ class SoapEngine:
                     if generated_days == expected_days and generated_days >= 2:
                         logger.info("[SoapEngine] Parser output valid, using it")
                         return plans_json
-                    else:
-                        logger.warning(f"[SoapEngine] Parser output invalid ({generated_days} days), falling back to core engine")
+                    logger.warning(f"[SoapEngine] Parser output invalid ({generated_days} days), falling back to core engine")
                 else:
                     logger.warning("[SoapEngine] Parser failed, falling back to core engine")
             except Exception as exc:
                 logger.error(f"[SoapEngine] Parser exception: {exc}, falling back to core engine")
 
-        logger.info("[SoapEngine] Using core engine for plan generation")
-        return generate_plan_local(profile)
+        profile = self._inject_focus_for_engine(profile)
+        parsed_output = self._build_parsed_output(parsed)
+        logger.info("[SoapEngine] Using fitness plan generator for exact matching")
+        return self._build_fitness_plan(profile, parsed_output)
+
+    def _normalize_plan_titles(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(plan, dict):
+            return plan
+
+        for day, content in plan.items():
+            if not isinstance(content, dict):
+                continue
+
+            title = content.get("workout_title", "")
+            category = content.get("main_workout_category", "")
+
+            if "upper" in title.lower() or "upper" in category.lower():
+                content["workout_title"] = "Upper Body Focus Workout"
+                content["main_workout_category"] = "Upper Body Focus"
+
+            elif "lower" in title.lower() or "lower" in category.lower():
+                content["workout_title"] = "Lower Body Focus Workout"
+                content["main_workout_category"] = "Lower Body Focus"
+
+            elif "full" in title.lower():
+                content["workout_title"] = "Full Body Focus Workout"
+                content["main_workout_category"] = "Full Body Focus"
+
+        return plan
+
+    def _normalize_row(self, row):
+        return {k.strip().lower(): v for k, v in row.items()}
+
+    def _get_tagged_exercises(self, tag):
+        df = self.soap_df if not self.soap_df.empty else self.fitness_df
+        df = df.copy()
+        df["tags"] = df["tags"].astype(str).str.lower()
+
+        return df[df["tags"].str.contains(tag.lower(), na=False)].to_dict("records")
+
+    def _format_exercise(self, row):
+        """Format a SOAP dataset row into an exercise dict."""
+        if isinstance(row, dict):
+            # Handle both dict and pandas Series inputs
+            # Try both uppercase (original CSV) and lowercase (DatasetService) column names
+            ex_name = (row.get("Exercise Name") or row.get("exercise_name") or 
+                      row.get("exercise name") or "")
+            sets_val = row.get("Sets") or row.get("sets") or ""
+            reps_val = row.get("Reps") or row.get("reps") or ""
+            rest_val = row.get("Rest intervals") or row.get("rest_intervals") or row.get("rest intervals") or ""
+            rpe_val = row.get("RPE") or row.get("rpe") or ""
+            benefit = row.get("Health benefit") or row.get("health_benefit") or row.get("health benefit") or ""
+            equip = row.get("Equipments") or row.get("equipments") or ""
+            body_region = row.get("Body Region") or row.get("body_region") or row.get("body region") or ""
+            steps = row.get("Steps to perform") or row.get("steps_to_perform") or row.get("steps") or ""
+            safety = row.get("Safety cue") or row.get("safety_cue") or row.get("safety_notes") or ""
+        else:
+            # pandas Series or similar object-like interface
+            ex_name = row.get("Exercise Name", "") or row.get("exercise_name", "") or ""
+            sets_val = row.get("Sets", "") or row.get("sets", "") or ""
+            reps_val = row.get("Reps", "") or row.get("reps", "") or ""
+            rest_val = (row.get("Rest intervals", "") or row.get("rest_intervals", "") or 
+                       row.get("rest intervals", "") or "")
+            rpe_val = row.get("RPE", "") or row.get("rpe", "") or ""
+            benefit = (row.get("Health benefit", "") or row.get("health_benefit", "") or 
+                      row.get("health benefit", "") or "")
+            equip = row.get("Equipments", "") or row.get("equipments", "") or ""
+            body_region = (row.get("Body Region", "") or row.get("body_region", "") or 
+                          row.get("body region", "") or "")
+            steps = (row.get("Steps to perform", "") or row.get("steps_to_perform", "") or 
+                    row.get("steps", "") or "")
+            safety = (row.get("Safety cue", "") or row.get("safety_cue", "") or 
+                     row.get("safety_notes", "") or "")
+
+        return {
+            "exercise_name": str(ex_name).strip(),
+            "name": str(ex_name).strip(),
+            "sets": str(sets_val).strip(),
+            "reps": str(reps_val).strip(),
+            "rest": str(rest_val).strip(),
+            "rpe": str(rpe_val).strip(),
+            "benefit": str(benefit).strip(),
+            "equipment": str(equip).strip(),
+            "body_region": str(body_region).strip(),
+            "steps_to_perform": str(steps).strip(),
+            "safety_cue": str(safety).strip()
+        }
+
+    def _build_warmup(self, focus):
+        """Build warmup with 1 cardio, 1 upper mobility, 1 lower mobility from SOAP dataset."""
+        if self.soap_df.empty:
+            return []
+        
+        df = self.soap_df.copy()
+        # Tags column in soap_df is lowercase after DatasetService loading
+        df["tags_lower"] = df.get("tags", pd.Series()).astype(str).str.lower()
+        
+        warmup_pool = df[df["tags_lower"].str.contains(r"warm", na=False, case=False)]
+        if warmup_pool.empty:
+            return []
+        
+        result = []
+        
+        # 1. Select 1 cardio exercise
+        cardio_ex = warmup_pool[
+            warmup_pool.get("primary_category", pd.Series()).astype(str).str.contains("Cardio", case=False, na=False)
+        ]
+        if not cardio_ex.empty:
+            result.append(self._format_exercise(cardio_ex.iloc[0]))
+        
+        # 2. Select 1 upper body mobility
+        body_col = warmup_pool.get("body_region", pd.Series()).astype(str)
+        prim_cat_col = warmup_pool.get("primary_category", pd.Series()).astype(str)
+        upper_mobility_ex = warmup_pool[
+            (body_col.str.contains("Upper", case=False, na=False)) &
+            (prim_cat_col.str.contains("Mobility|Activation", case=False, na=False, regex=True))
+        ]
+        if not upper_mobility_ex.empty:
+            result.append(self._format_exercise(upper_mobility_ex.iloc[0]))
+        else:
+            mobility_pool = warmup_pool[
+                prim_cat_col.str.contains("Mobility|Activation", case=False, na=False, regex=True)
+            ]
+            if not mobility_pool.empty:
+                result.append(self._format_exercise(mobility_pool.iloc[0]))
+        
+        # 3. Select 1 lower body mobility
+        lower_mobility_ex = warmup_pool[
+            (warmup_pool.get("body_region", pd.Series()).astype(str).str.contains("Lower", case=False, na=False)) &
+            (warmup_pool.get("primary_category", pd.Series()).astype(str).str.contains("Mobility|Activation", case=False, na=False, regex=True))
+        ]
+        if not lower_mobility_ex.empty:
+            result.append(self._format_exercise(lower_mobility_ex.iloc[0]))
+        else:
+            mobility_pool = warmup_pool[
+                warmup_pool.get("primary_category", pd.Series()).astype(str).str.contains("Mobility|Activation", case=False, na=False, regex=True)
+            ]
+            used_names = {r["name"] for r in result if r.get("name")}
+            for idx in range(len(mobility_pool)):
+                ex = mobility_pool.iloc[idx]
+                ex_name = str(ex.get("exercise_name", "")).strip()
+                if ex_name and ex_name not in used_names:
+                    result.append(self._format_exercise(ex))
+                    break
+        
+        # 4. If we still need more exercises to reach 3, fill with other warm-up exercises
+        used_names = {r["name"] for r in result if r.get("name")}
+        idx = 0
+        while len(result) < 3 and idx < len(warmup_pool):
+            ex = warmup_pool.iloc[idx]
+            ex_name = str(ex.get("exercise_name", "")).strip()
+            if ex_name and ex_name not in used_names:
+                result.append(self._format_exercise(ex))
+                used_names.add(ex_name)
+            idx += 1
+        
+        return result[:3]
+
+    def _build_cooldown(self, focus):
+        """Build cooldown with 3 stretching exercises from SOAP dataset."""
+        if self.soap_df.empty:
+            return []
+        
+        df = self.soap_df.copy()
+        # Tags column in soap_df is lowercase after DatasetService loading
+        df["tags_lower"] = df.get("tags", pd.Series()).astype(str).str.lower()
+        
+        cooldown_pool = df[df["tags_lower"].str.contains(r"cool", na=False, case=False)]
+        if cooldown_pool.empty:
+            return []
+        
+        prim_cat_col = cooldown_pool.get("primary_category", pd.Series()).astype(str)
+        stretch_pool = cooldown_pool[
+            prim_cat_col.str.contains("Stretch|Flexibility", case=False, na=False, regex=True)
+        ]
+        
+        if stretch_pool.empty:
+            stretch_pool = cooldown_pool
+        
+        result = []
+        seen = set()
+        
+        for idx in range(min(3, len(stretch_pool))):
+            ex = stretch_pool.iloc[idx]
+            ex_name = str(ex.get("exercise_name", "")).strip().lower()
+            if ex_name and ex_name not in seen:
+                result.append(self._format_exercise(ex))
+                seen.add(ex_name)
+        
+        while len(result) < 3 and len(cooldown_pool) > len(result):
+            for idx in range(len(cooldown_pool)):
+                ex = cooldown_pool.iloc[idx]
+                ex_name = str(ex.get("exercise_name", "")).strip().lower()
+                if ex_name and ex_name not in seen:
+                    result.append(self._format_exercise(ex))
+                    seen.add(ex_name)
+                    if len(result) >= 3:
+                        break
+        
+        return result[:3]
+
+    def _refine_main_workout(self, day_plan):
+        main = day_plan.get("main_workout", [])
+
+        dataset_main = self._get_tagged_exercises("main")
+
+        if not main:
+            return [self._format_exercise(e) for e in dataset_main[:5]]
+
+        return main
+
+    def _apply_restrictions(self, day_plan, restrictions):
+        if not restrictions:
+            return day_plan
+
+        restricted_keywords = {
+            "knee pain": ["squat", "lunge"],
+            "low back pain": ["deadlift", "bend"],
+            "shoulder pain": ["overhead", "press"]
+        }
+
+        all_blocks = ["warmup", "main_workout", "cooldown"]
+
+        for block in all_blocks:
+            exercises = day_plan.get(block, [])
+            filtered = []
+
+            for ex in exercises:
+                name = str(ex.get("exercise_name", "")).lower()
+
+                if any(
+                    bad in name
+                    for r in restrictions
+                    for bad in restricted_keywords.get(r, [])
+                ):
+                    continue
+
+                filtered.append(ex)
+
+            day_plan[block] = filtered
+
+        return day_plan
+
+    def _prioritize_soap_dataset(self, day_plan):
+        soap_names = set(self.soap_df["exercise_name"].str.lower().tolist())
+
+        for block in ["warmup", "main_workout", "cooldown"]:
+            exercises = day_plan.get(block, [])
+
+            exercises.sort(
+                key=lambda x: str(x.get("exercise_name", "")).lower() not in soap_names
+            )
+
+            day_plan[block] = exercises
+
+        return day_plan
 
     def _build_prescription_narrative(self, parsed: SoapParseResult) -> str:
         narrative_parts: List[str] = []
@@ -149,6 +387,89 @@ class SoapEngine:
         if parsed.structured_vitals:
             narrative_parts.append(f"Vitals: {parsed.structured_vitals}")
         return "\n".join(narrative_parts)
+
+    def _build_parsed_output(self, parsed: SoapParseResult) -> Dict[str, Any]:
+        explicit_days = {}
+        day_focus_map = parsed.inferred_profile.get("day_focus_map", {}) or {}
+        for day in parsed.inferred_profile.get("days", []) or []:
+            focus = day_focus_map.get(day, "General")
+            explicit_days[day] = [focus]
+
+        mandatory_exercises = []
+        for item in parsed.prescribed_exercises or []:
+            if isinstance(item, str) and item.strip():
+                mandatory_exercises.append({"name": item.strip(), "category": "main"})
+
+        parsed_output: Dict[str, Any] = {
+            "extract": {
+                "schedule": {"explicit_days": explicit_days}
+            },
+            "mandatory": mandatory_exercises,
+        }
+        return parsed_output
+
+    def _build_fitness_plan(self, profile: Dict[str, Any], parsed_output: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            planner = FitnessPlanGeneratorTool()
+            result = self._run_async(planner.execute(constraints=profile, parsed_output=parsed_output))
+            if result and result.success:
+                plan = result.data.get("plans_json") or result.data.get("json_plan") or {}
+                return self._fill_missing_warmup_cooldown(plan)
+            logger.warning("[SoapEngine] FitnessPlanGeneratorTool failed, falling back to generate_plan_local")
+        except Exception as exc:
+            logger.error(f"[SoapEngine] FitnessPlanGeneratorTool exception: {exc}", exc_info=True)
+        return self._fill_missing_warmup_cooldown(generate_plan_local(profile))
+
+    def _fill_missing_warmup_cooldown(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(plan, dict):
+            return plan
+
+        for day_name, content in plan.items():
+            if not isinstance(content, dict):
+                continue
+
+            focus = content.get("main_workout_category", "")
+            
+            # Always populate warmup and cooldown from SOAP dataset
+            content["warmup"] = self._build_warmup(focus)
+            content["cooldown"] = self._build_cooldown(focus)
+
+            plan[day_name] = content
+        
+        return plan
+
+        return plan
+
+    def _normalize_focus_label(self, focus: str) -> str:
+        focus = (focus or "").strip().lower()
+
+        if "upper" in focus:
+            return "Upper Body Focus"
+        if "lower" in focus:
+            return "Lower Body Focus"
+        if "full" in focus:
+            return "Full Body Focus"
+        if "cardio" in focus:
+            return "Cardio Focus"
+        return "Full Body Focus"
+
+    def _inject_focus_for_engine(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        focus_map = profile.get("day_focus_map", {})
+
+        for day in profile.get("structured_days", []):
+            focus = focus_map.get(day["day_name"], "General")
+            focus_lower = (focus or "").lower()
+
+            if "upper" in focus_lower:
+                day["muscle_focus"] = "upper"
+            elif "lower" in focus_lower:
+                day["muscle_focus"] = "lower"
+            elif "full" in focus_lower:
+                day["muscle_focus"] = "full"
+            else:
+                day["muscle_focus"] = "full"
+
+        return profile
 
     def _run_async(self, coro):
         try:
@@ -318,24 +639,41 @@ class SoapEngine:
     def _openai_client(self) -> Optional[Any]:
         if getattr(self, "_ai_client", None) is not None:
             return self._ai_client
+
         try:
             from openai import AzureOpenAI
-            from dotenv import load_dotenv
-            load_dotenv()
-            logger = logging.getLogger(__name__)
-            api_key = os.getenv("AZURE_AI_KEY")
+
+            # 🔥 Streamlit + Local compatibility
+            try:
+                import streamlit as st
+                api_key = st.secrets.get("AZURE_AI_KEY")
+            except Exception:
+                api_key = None
+
+            if not api_key:
+                api_key = os.getenv("AZURE_AI_KEY")
+
+            logger.info(f"API KEY FOUND: {bool(api_key)}")
+
             endpoint = "https://nouriqfriskacc7470931625.cognitiveservices.azure.com/"
             api_version = "2024-12-01-preview"
+
             if not api_key:
-                logger.warning("OpenAI API key is not configured; AI schedule extraction disabled.")
+                logger.warning("OpenAI API key is not configured; AI disabled.")
                 self._ai_client = None
             else:
-                self._ai_client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=endpoint)
-        except Exception as exc:
-            logger.warning("OpenAI client init failed: %s — AI schedule extraction disabled.", exc)
-            self._ai_client = None
-        return self._ai_client
+                self._ai_client = AzureOpenAI(
+                    api_key=api_key,
+                    api_version=api_version,
+                    azure_endpoint=endpoint
+                )
 
+        except Exception as exc:
+            logger.warning("OpenAI client init failed: %s — AI disabled.", exc)
+            self._ai_client = None
+
+        return self._ai_client
+    
     def _ai_extract_schedule(self, text: str) -> Dict[str, Any]:
         client = self._openai_client()
         if client is None:
@@ -489,6 +827,16 @@ Return ONLY valid JSON (no markdown, no explanation).
 
         for item in plan:
             focus = str(item.get("focus", "General")).strip().title()
+            if "upper" in focus.lower():
+                focus = "Upper Body"
+            elif "lower" in focus.lower():
+                focus = "Lower Body"
+            elif "full" in focus.lower():
+                focus = "Full Body"
+            elif "cardio" in focus.lower():
+                focus = "Cardio"
+            else:
+                focus = "Full Body"
             try:
                 count = int(item.get("count", 0))
             except Exception:
@@ -510,14 +858,16 @@ Return ONLY valid JSON (no markdown, no explanation).
         logger.info(f"AI Output: {ai_output}")
         if ai_output.get("weekly_days", 0) >= 2:
             ai_week_structure = self._convert_ai_to_week_structure(ai_output)
-            if not ai_week_structure:
-                ai_week_structure = [
-                    {"day_name": DAY_ORDER[i], "focus": "General"}
-                    for i in range(min(ai_output.get("weekly_days", 0), len(DAY_ORDER)))
-                ]
-            logger.info("Using AI-derived week structure")
-            logger.info(f"Week structure: {ai_week_structure}")
-            return ai_week_structure
+            if ai_week_structure:
+                if all(item["focus"].lower() == "strength" for item in ai_week_structure) or all(item["focus"].lower() == "general" for item in ai_week_structure):
+                    logger.info("Adding variation → converting some days to Full Body")
+                    for i in range(len(ai_week_structure)):
+                        if i % 2 == 0:
+                            ai_week_structure[i]["focus"] = "Full Body"
+                logger.info("Using AI-derived week structure")
+                logger.info(f"Week structure: {ai_week_structure}")
+                return ai_week_structure
+            logger.warning("AI returned weekly_days but no usable week structure; falling back to parser heuristics")
 
         schedule_type = self._detect_schedule_type(text)
         logger.info(f"Detected schedule type: {schedule_type}")
@@ -534,6 +884,12 @@ Return ONLY valid JSON (no markdown, no explanation).
                 week_structure = [{"day_name": DAY_ORDER[i], "focus": "General"} for i in range(min(frequency, len(DAY_ORDER)))]
         else:
             week_structure = []
+
+        if week_structure and (all(item["focus"].lower() == "strength" for item in week_structure) or all(item["focus"].lower() == "general" for item in week_structure)):
+            logger.info("Adding variation → converting some days to Full Body")
+            for i in range(len(week_structure)):
+                if i % 2 == 0:
+                    week_structure[i]["focus"] = "Full Body"
 
         logger.info(f"Week structure: {week_structure}")
         return week_structure
@@ -562,9 +918,20 @@ Return ONLY valid JSON (no markdown, no explanation).
                     count = int(count_str)
                 else:
                     count = word_to_num.get(count_str, 1)
+                focus = focus.title()
+                if "upper" in focus.lower():
+                    focus = "Upper Body"
+                elif "lower" in focus.lower():
+                    focus = "Lower Body"
+                elif "full" in focus.lower():
+                    focus = "Full Body"
+                elif "cardio" in focus.lower():
+                    focus = "Cardio"
+                else:
+                    focus = "General"
                 for _ in range(count):
                     if day_index < len(DAY_ORDER):
-                        splits.append({"day_name": DAY_ORDER[day_index], "focus": focus.title()})
+                        splits.append({"day_name": DAY_ORDER[day_index], "focus": focus})
                         day_index += 1
 
         # If no splits found, fallback to frequency
