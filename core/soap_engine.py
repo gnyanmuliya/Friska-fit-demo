@@ -167,6 +167,30 @@ class SoapEngine:
     def _normalize_row(self, row):
         return {k.strip().lower(): v for k, v in row.items()}
 
+    def _normalize_tags(self, tags: Any) -> List[str]:
+        tags_text = str(tags or "").strip().lower()
+        if not tags_text:
+            return []
+        # Support comma and slash separators and normalize spacing
+        return [tag.strip() for tag in re.split(r"[,/]+", tags_text) if tag.strip()]
+
+    def _parse_rpe_range(self, rpe: Any) -> tuple[Optional[float], Optional[float]]:
+        rpe_text = str(rpe or "").strip().lower().replace("rpe", "").replace("na", "").replace("n/a", "").replace("–", "-").replace("—", "-")
+        if not rpe_text:
+            return None, None
+        parts = [part.strip() for part in rpe_text.split("-") if part.strip()]
+        values = []
+        for part in parts:
+            try:
+                values.append(float(part))
+            except ValueError:
+                continue
+        if not values:
+            return None, None
+        if len(values) == 1:
+            return values[0], values[0]
+        return min(values), max(values)
+
     def _normalize_split_focus(self, focus: str) -> str:
         focus = (focus or "").strip().lower()
         if "upper" in focus:
@@ -220,9 +244,9 @@ class SoapEngine:
     def _get_tagged_exercises(self, tag, equipment_preference: Optional[List[str]] = None, restrictions: Optional[List[str]] = None):
         df = self.soap_df if not self.soap_df.empty else self.fitness_df
         df = df.copy()
-        df["tags"] = df["tags"].astype(str).str.lower()
+        df["tags_list"] = df.get("tags", pd.Series()).apply(self._normalize_tags)
 
-        filtered = df[df["tags"].str.contains(tag.lower(), na=False)]
+        filtered = df[df["tags_list"].apply(lambda tags: tag.lower().strip() in tags)]
         if restrictions:
             filtered = filtered[~filtered.apply(lambda row: self._exercise_matches_restrictions(row, restrictions), axis=1)]
 
@@ -304,18 +328,90 @@ class SoapEngine:
             return []
 
         df = self.soap_df.copy()
-        df["tags_lower"] = df.get("tags", pd.Series()).astype(str).str.lower()
+        df["tags_list"] = df.get("tags", pd.Series()).apply(self._normalize_tags)
 
         if restrictions:
             df = df[~df.apply(lambda row: self._exercise_matches_restrictions(row, restrictions), axis=1)]
 
-        warmup_pool = df[df["tags_lower"].str.contains(r"warm", na=False, case=False)]
+        warmup_pool = df[df["tags_list"].apply(lambda tags: "warm up" in tags)]
         if warmup_pool.empty:
             return []
 
-        warmup_pool = warmup_pool[~warmup_pool.get("primary_category", pd.Series()).astype(str).str.contains("Strength", case=False, na=False)]
-        if warmup_pool.empty:
-            warmup_pool = df[df["tags_lower"].str.contains(r"warm", na=False, case=False)]
+        warmup_pool["rpe_min"], warmup_pool["rpe_max"] = zip(*warmup_pool.get("rpe", warmup_pool.get("RPE", pd.Series())).apply(self._parse_rpe_range))
+
+        def sort_candidates(pool):
+            sort_columns = [col for col in ["rpe_min", "exercise_name", "Exercise Name"] if col in pool.columns]
+            return pool.sort_values(by=sort_columns, na_position="last")
+
+        if equipment:
+            equipment_lower = [eq.lower() for eq in equipment]
+            warmup_pool["_equip_preferred"] = warmup_pool.get("equipments", pd.Series()).astype(str).str.lower().apply(
+                lambda x: any(eq in x for eq in equipment_lower)
+            )
+            warmup_pool = pd.concat([warmup_pool[warmup_pool["_equip_preferred"]], warmup_pool[~warmup_pool["_equip_preferred"]]], ignore_index=True)
+            warmup_pool = warmup_pool.drop(columns=["_equip_preferred"], errors="ignore")
+
+        day_index = DAY_ORDER.index(day_name) if day_name in DAY_ORDER else 0
+
+        def pick_from_pool(pool, predicate=None, used_names=None):
+            used_names = used_names or set()
+            pool_sorted = sort_candidates(pool)
+            for idx in range(len(pool_sorted)):
+                ex = pool_sorted.iloc[(day_index + idx) % len(pool_sorted)]
+                ex_name = str(ex.get("exercise_name", "") or ex.get("Exercise Name", "")).strip()
+                if not ex_name or ex_name in used_names:
+                    continue
+                if predicate is None or predicate(ex):
+                    used_names.add(ex_name)
+                    formatted = self._format_exercise(ex, force_single_set=True)
+                    return formatted, used_names
+            return None, used_names
+
+        def warmup_intensity_ok(ex):
+            rpe_min = ex.get("rpe_min")
+            if rpe_min is None:
+                return True
+            return rpe_min < 7
+
+        result = []
+        used_names = set()
+
+        cardio_ex, used_names = pick_from_pool(
+            warmup_pool,
+            lambda ex: str(ex.get("primary_category", "")).lower() == "cardio",
+            used_names,
+        )
+        if cardio_ex:
+            cardio_ex["reps"] = "1-2 min"
+            result.append(cardio_ex)
+
+        upper_ex, used_names = pick_from_pool(
+            warmup_pool,
+            lambda ex: "upper" in str(ex.get("body_region", "")).lower()
+                       and bool(re.search(r"mobility|activation", str(ex.get("primary_category", "")), re.I))
+                       and warmup_intensity_ok(ex),
+            used_names,
+        )
+        if upper_ex:
+            result.append(upper_ex)
+
+        lower_ex, used_names = pick_from_pool(
+            warmup_pool,
+            lambda ex: "lower" in str(ex.get("body_region", "")).lower()
+                       and bool(re.search(r"mobility|activation", str(ex.get("primary_category", "")), re.I))
+                       and warmup_intensity_ok(ex),
+            used_names,
+        )
+        if lower_ex:
+            result.append(lower_ex)
+
+        while len(result) < 3 and len(warmup_pool) > 0:
+            ex, used_names = pick_from_pool(warmup_pool, None, used_names)
+            if not ex:
+                break
+            result.append(ex)
+
+        return result[:3]
 
         if equipment:
             equipment_lower = [eq.lower() for eq in equipment]
@@ -336,7 +432,8 @@ class SoapEngine:
                     continue
                 if predicate is None or predicate(ex):
                     used_names.add(ex_name)
-                    return self._format_exercise(ex, force_single_set=True), used_names
+                    formatted = self._format_exercise(ex, force_single_set=True)
+                    return formatted, used_names
             return None, used_names
 
         result = []
@@ -344,15 +441,16 @@ class SoapEngine:
 
         cardio_ex, used_names = pick_from_pool(
             warmup_pool,
-            lambda ex: str(ex.get("primary_category", "")).lower().count("cardio") > 0,
+            lambda ex: str(ex.get("primary_category", "")).lower() == "cardio",
             used_names,
         )
         if cardio_ex:
+            cardio_ex["reps"] = "1-2 min"
             result.append(cardio_ex)
 
         upper_ex, used_names = pick_from_pool(
             warmup_pool,
-            lambda ex: "upper" in str(ex.get("body_region", "")).lower() and bool(re.search(r"mobility|activation|warm", str(ex.get("primary_category", "")), re.I)),
+            lambda ex: "upper" in str(ex.get("body_region", "")).lower() and bool(re.search(r"mobility|activation", str(ex.get("primary_category", "")), re.I)),
             used_names,
         )
         if upper_ex:
@@ -360,7 +458,7 @@ class SoapEngine:
 
         lower_ex, used_names = pick_from_pool(
             warmup_pool,
-            lambda ex: "lower" in str(ex.get("body_region", "")).lower() and bool(re.search(r"mobility|activation|warm", str(ex.get("primary_category", "")), re.I)),
+            lambda ex: "lower" in str(ex.get("body_region", "")).lower() and bool(re.search(r"mobility|activation", str(ex.get("primary_category", "")), re.I)),
             used_names,
         )
         if lower_ex:
@@ -380,14 +478,50 @@ class SoapEngine:
             return []
 
         df = self.soap_df.copy()
-        df["tags_lower"] = df.get("tags", pd.Series()).astype(str).str.lower()
+        df["tags_list"] = df.get("tags", pd.Series()).apply(self._normalize_tags)
 
         if restrictions:
             df = df[~df.apply(lambda row: self._exercise_matches_restrictions(row, restrictions), axis=1)]
 
-        cooldown_pool = df[df["tags_lower"].str.contains(r"cool", na=False, case=False)]
+        cooldown_pool = df[df["tags_list"].apply(lambda tags: "cooldown" in tags)]
         if cooldown_pool.empty:
             return []
+
+        stretch_pool = cooldown_pool[
+            cooldown_pool.get("primary_category", pd.Series()).astype(str).str.contains("Stretch|Flexibility|Mobility|Recovery", case=False, na=False, regex=True)
+        ]
+        if stretch_pool.empty:
+            stretch_pool = cooldown_pool
+
+        if equipment:
+            equipment_lower = [eq.lower() for eq in equipment]
+            stretch_pool["_equip_preferred"] = stretch_pool.get("equipments", pd.Series()).astype(str).str.lower().apply(
+                lambda x: any(eq in x for eq in equipment_lower)
+            )
+            stretch_pool = pd.concat([stretch_pool[stretch_pool["_equip_preferred"]], stretch_pool[~stretch_pool["_equip_preferred"]]], ignore_index=True)
+            stretch_pool = stretch_pool.drop(columns=["_equip_preferred"], errors="ignore")
+
+        day_index = DAY_ORDER.index(day_name) if day_name in DAY_ORDER else 0
+        result = []
+        seen = set()
+
+        for idx in range(min(3, len(stretch_pool))):
+            ex = stretch_pool.iloc[(day_index + idx) % len(stretch_pool)]
+            ex_name = str(ex.get("exercise_name", "") or ex.get("Exercise Name", "")).strip().lower()
+            if ex_name and ex_name not in seen:
+                result.append(self._format_exercise(ex, force_single_set=True))
+                seen.add(ex_name)
+
+        idx = 0
+        while len(result) < 3 and idx < len(stretch_pool):
+            ex = stretch_pool.iloc[(day_index + idx) % len(stretch_pool)]
+            ex_name = str(ex.get("exercise_name", "") or ex.get("Exercise Name", "")).strip().lower()
+            if ex_name and ex_name not in seen:
+                result.append(self._format_exercise(ex, force_single_set=True))
+                seen.add(ex_name)
+            idx += 1
+
+        return result[:3]
 
         stretch_pool = cooldown_pool[
             cooldown_pool.get("primary_category", pd.Series()).astype(str).str.contains("Stretch|Flexibility|Mobility|Recovery", case=False, na=False, regex=True)

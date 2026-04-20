@@ -106,6 +106,22 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     if normalized.get("blood_pressure") and not normalized.get("bp"):
         normalized["bp"] = normalized["blood_pressure"]
 
+    if normalized.get("restrictions") and not normalized.get("physical_limitations"):
+        normalized["physical_limitations"] = ", ".join(
+            str(x).strip() for x in normalized["restrictions"] if str(x).strip()
+        )
+    flags = normalized.get("flags", {}) or {}
+    for restriction in normalized.get("restrictions", []):
+        text = str(restriction or "").lower()
+        if any(keyword in text for keyword in ["knee pain", "acl", "meniscus", "patella", "knee injury"]):
+            flags["knee_sensitive"] = True
+        if "avoid floor" in text or "floor work" in text or "cannot lie down" in text:
+            flags["avoid_floor_work"] = True
+        if any(keyword in text for keyword in ["high impact", "jump", "plyo", "sprint"]):
+            flags["high_impact_restricted"] = True
+    if flags:
+        normalized["flags"] = flags
+
     normalized.setdefault("fitness_level", "Beginner")
     normalized.setdefault("session_duration", "30 min")
     normalized.setdefault("weight_kg", 70)

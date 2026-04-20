@@ -16,7 +16,7 @@ DAY_ORDER = [
     "Sunday",
 ]
 
-PRIMARY_GOALS = ["Weight Loss", "Muscle Gain", "Weight Maintenance", "Mobility"]
+PRIMARY_GOALS = ["Weight Loss", "Weight Gain", "Weight Maintenance"]
 SECONDARY_GOALS = [
     "Improve Posture",
     "Increase Stamina",

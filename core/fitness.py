@@ -549,63 +549,7 @@ class WorkoutComposer:
         return int(per_set_time)
 
     def _generate_dynamic_title(self, day_type, main_exercises):
-        if not main_exercises:
-            return f"{day_type} Session"
-
-        TITLE_MAP = {
-            "Upper": [
-                "Upper Body Strength & Definition", "Upper Body Strength Builder",
-                "Upper Body Functional Strength", "Upper Body Strength & Stability",
-                "Upper Body Mobility Flow", "Upper Body Strength & Mobility",
-                "Upper Body Movement & Control",
-            ],
-            "Lower": [
-                "Lower Body Strength & Power", "Lower Body Strength Builder",
-                "Lower Body Stability & Strength", "Lower Body Mobility & Balance",
-                "Lower Body Strength & Mobility", "Lower Body Movement & Control",
-            ],
-            "Core": [
-                "Core Strength & Stability", "Core Control & Conditioning",
-                "Core Strength Builder", "Core Mobility & Stability",
-                "Core Activation & Control",
-            ],
-            "Full": [
-                "Full Body Strength & Conditioning", "Full Body Functional Strength",
-                "Full Body Strength & Stability", "Full Body Cardio Conditioning",
-                "Low Impact Cardio Session", "Moderate Intensity Cardio",
-                "Full Body Mobility Flow", "Full Body Recovery & Stretch",
-                "Full Body Movement & Balance",
-            ],
-            "Cardio": [
-                "Progressive Cardio Conditioning", "Interval Cardio Session",
-                "Steady Pace Cardio", "Cardio & Endurance Builder",
-                "Moderate Intensity Cardio Flow",
-            ],
-        }
-
-        regions = []
-        for ex in main_exercises:
-            name = ex.get("name", "").lower()
-            if any(x in name for x in ['squat', 'lunge', 'leg', 'calf', 'deadlift']):
-                regions.append("Lower")
-            elif any(x in name for x in ['press', 'push', 'row', 'pull', 'chest', 'arm', 'shoulder']):
-                regions.append("Upper")
-            elif any(x in name for x in ['plank', 'core', 'crunch', 'abs', 'twist']):
-                regions.append("Core")
-            elif any(x in name for x in ['run', 'cardio', 'jump', 'burpee', 'hiit']):
-                regions.append("Cardio")
-
-        if not regions:
-            return day_type
-
-        dominant = Counter(regions).most_common(1)[0][0]
-        unique_regions = set(regions)
-        if len(unique_regions) > 2:
-            dominant = "Full"
-
-        titles = TITLE_MAP.get(dominant, TITLE_MAP["Full"])
-        index = len(main_exercises) % len(titles)
-        return titles[index]
+        return "Full Body Strength Workout"
 
     def _infer_missing_details(self, name: str, original_text: str) -> pd.Series:
         lower = name.lower()
@@ -721,14 +665,7 @@ _DAY_NAME_FOCUS_MAP = {
 
 
 def _current_day_focus(clinical_context: Optional[Dict[str, Any]]) -> str:
-    ctx = clinical_context or {}
-    day_name = str(ctx.get("day_name") or "").strip()
-    if day_name:
-        mapped_focus = _DAY_NAME_FOCUS_MAP.get(day_name)
-        if mapped_focus:
-            return mapped_focus
-    day_index = int(ctx.get("day_index", 0) or 0)
-    return _DAY_FOCUS_CYCLE[day_index % len(_DAY_FOCUS_CYCLE)]
+    return "Full Body"
 
 
 def _exercise_text_blob(row: pd.Series) -> str:
@@ -781,7 +718,17 @@ def _classify_exercise_categories(row: pd.Series) -> Set[str]:
         elif "core" in body:
             categories.add("core")
         elif "full" in body:
-            categories.update({"lower_body", "cardio"})
+            if core_signal:
+                categories.add("core")
+            elif upper_signal:
+                if re.search(r"\b(row|pull|curl)\b", name):
+                    categories.add("upper_pull")
+                else:
+                    categories.add("upper_push")
+            elif lower_signal:
+                categories.add("lower_body")
+            else:
+                categories.add("full_body")
 
     return categories
 
@@ -831,7 +778,7 @@ def _matches_day_focus(row: pd.Series, day_focus: str) -> bool:
     if day_focus == "Core Focus":
         return "core" in cats or "stability" in text
     if day_focus == "Full Body":
-        return "full" in body_region or len(cats) >= 2
+        return True
     return True
 
 
@@ -1126,6 +1073,10 @@ def _workoutcomposer_build_day(
         row = _guard_single_row(row, slot_name)
         if row is None:
             return False
+        if slot_name == "main_workout":
+            row_reps = str(row.get("Reps", "") or row.get("reps", "")).strip()
+            if row_reps and row_reps.lower() not in {"nan", "none", ""}:
+                reps = row_reps
         guid = str(row.get("guidid", "")).strip()
         if not guid or guid.lower() == "none":
             return False
@@ -1413,7 +1364,6 @@ def _workoutcomposer_build_day(
             if _append_entry("main_workout", ex, params["sets"], params["reps"], params["rest"], params["rpe"], {"slot": slot_label, "bucket": category}):
                 matched = [cat for cat in required_categories if cat in _classify_exercise_categories(ex)]
                 selected_main_categories.extend(matched or [category])
-                print(f"[DEBUG] Day {int(self._active_clinical_context.get('day_index', 0) or 0)} | Category={category} | Selected={str(ex.get('Exercise Name', ''))}")
                 return True
         return False
 
@@ -1465,6 +1415,7 @@ def _workoutcomposer_build_day(
         plan["main_workout"] = plan["main_workout"][:target_main]
 
     plan['workout_title'] = self._generate_dynamic_title(day_type, plan['main_workout'])
+    plan['main_workout_category'] = "Full Body Strength"
 
     total_day_sec = 0
     total_day_calories = 0
