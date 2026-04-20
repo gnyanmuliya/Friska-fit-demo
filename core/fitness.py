@@ -1073,10 +1073,12 @@ def _workoutcomposer_build_day(
         row = _guard_single_row(row, slot_name)
         if row is None:
             return False
-        if slot_name == "main_workout":
-            row_reps = str(row.get("Reps", "") or row.get("reps", "")).strip()
-            if row_reps and row_reps.lower() not in {"nan", "none", ""}:
-                reps = row_reps
+        row_sets = str(row.get("Sets", "") or row.get("sets", "")).strip()
+        row_reps = str(row.get("Reps", "") or row.get("reps", "")).strip()
+        if row_sets and row_sets.lower() not in {"nan", "none", ""}:
+            sets = row_sets
+        if row_reps and row_reps.lower() not in {"nan", "none", ""}:
+            reps = row_reps
         guid = str(row.get("guidid", "")).strip()
         if not guid or guid.lower() == "none":
             return False
