@@ -258,6 +258,28 @@ def render_plan(
 
 
 def _render_exercise_card(exercise: dict, user_profile: Optional[Dict[str, Any]] = None) -> None:
+    if exercise.get("_is_session_payload"):
+        session_steps = exercise.get("steps") or exercise.get("steps_to_perform") or []
+        if isinstance(session_steps, str):
+            session_steps = [session_steps]
+        st.markdown(
+            f"""
+            <div class="exercise-card">
+                <div class="exercise-name">SESSION BLOCK: {exercise.get("name", "Session")}</div>
+                <div class="exercise-meta">Duration: {exercise.get("reps", "N/A")}</div>
+                <div class="exercise-copy">{exercise.get("benefit", "Guided session")}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if exercise.get("equipment"):
+            st.caption(f"Mode / Equipment: {exercise['equipment']}")
+        if session_steps:
+            with st.expander("Instruction"):
+                for step in session_steps:
+                    st.write(str(step))
+        return
+
     rpe_value = str(exercise.get("intensity_rpe", "N/A")).replace("RPE", "").strip()
     calories = _resolve_exercise_calories(exercise, user_profile)
     calories_text = f"Calories: {calories} kcal" if calories is not None else None

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import os
 from typing import Dict, Any, List
 from openai import AzureOpenAI
 
@@ -96,6 +97,8 @@ REQUIRED OUTPUT FORMAT (strict JSON):
 
 "avoid_exercises": [],
 
+"equipment_required": ["dumbbells", "resistance band", "treadmill"],
+
 "target_body_parts": ["Full Body"],
 
 "weekly_schedule": {{
@@ -107,6 +110,55 @@ REQUIRED OUTPUT FORMAT (strict JSON):
 "saturday": "Cardio/weight or HIIT/Interval 30-45 mins",
 "sunday": "Rest or bike ride/brisk walk"
 }},
+
+"session_directives": [
+{{
+"day": "tuesday",
+"session_type": "yoga",
+"label": "Join Yoga Session",
+"duration_min": 30,
+"instruction": "Join yoga session",
+"source_text": "Tuesday yoga class 6:30pm-7:00pm"
+}},
+{{
+"day": "friday",
+"session_type": "cardio",
+"label": "Cardio Session",
+"duration_min": 30,
+"instruction": "Brisk walk or treadmill cardio",
+"source_text": "Cardio 30 minutes"
+}}
+],
+
+"session_types": [
+{{
+"type": "yoga",
+"mode": "class",
+"label": "Join Yoga Session",
+"duration": 30
+}},
+{{
+"type": "cardio",
+"mode": "session",
+"label": "Cardio Session",
+"duration": 30
+}}
+],
+
+"day_type_rules": [
+{{
+"type": "hiit",
+"mapped_to": "full_body_cardio"
+}},
+{{
+"type": "interval",
+"mapped_to": "full_body_cardio"
+}},
+{{
+"type": "circuit",
+"mapped_to": "full_body_cardio"
+}}
+],
 
 "cardio_requirements": {{
 "frequency": "3x per week",
@@ -149,8 +201,12 @@ EXTRACTION RULES:
 - intensity: Based on prescribed loads/durations
 - prescribed_exercises: ALL exercises mentioned in Plan of Action or Exercise Session
 - avoid_exercises: Any contraindicated exercises
+- equipment_required: Extract all available or prescribed equipment from the note such as dumbbells, resistance band, treadmill, bike, elliptical.
 - target_body_parts: Body areas targeted
 - weekly_schedule: Copy Sample Week exactly
+- session_directives: Extract explicit daily sessions/classes from the note such as yoga session, yoga class, pilates class, cardio session, HIIT/interval/circuit block. Preserve join/class wording when present.
+- session_types: Extract reusable session definitions. Preserve the exact coach wording in label.
+- day_type_rules: Extract mapping rules such as HIIT/Interval/Circuit -> full_body_cardio.
 - cardio_requirements: Extract cardio specifications
 - resistance_training: Extract weight training details
 - hiit_training: Extract HIIT/interval specifications
@@ -186,6 +242,15 @@ Return ONLY valid JSON. No explanations or additional text.
 
         if not isinstance(parsed["weekly_schedule"], dict):
             raise ValueError("weekly_schedule must be dict")
+
+        if "session_directives" in parsed and not isinstance(parsed["session_directives"], list):
+            raise ValueError("session_directives must be list")
+        if "session_types" in parsed and not isinstance(parsed["session_types"], list):
+            raise ValueError("session_types must be list")
+        if "day_type_rules" in parsed and not isinstance(parsed["day_type_rules"], list):
+            raise ValueError("day_type_rules must be list")
+        if "equipment_required" in parsed and not isinstance(parsed["equipment_required"], list):
+            raise ValueError("equipment_required must be list")
 
         # Validate prescribed exercises structure
         for ex in parsed["prescribed_exercises"]:

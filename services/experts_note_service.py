@@ -779,21 +779,35 @@ class ExpertsNoteService:
                 continue
             
             # Parse activities from the text
-            activities = self._parse_day_activities(activities_text)
+            activities = self._parse_day_activities(activities_text, ai_prescription)
+            activities = self._apply_session_directives(normalized_day_name, activities, ai_prescription)
+            priority_order = {
+                "full_body_cardio": 0,
+                "cardio": 1,
+                "resistance": 2,
+                "yoga": 3,
+            }
+            activities = sorted(
+                activities,
+                key=lambda item: priority_order.get(str(item.get("type", "")).lower(), 99),
+            )
+            seen_types: Set[str] = set()
+            unique_activities: List[Dict[str, Any]] = []
+            for activity in activities:
+                activity_type = str(activity.get("type", "")).lower()
+                if activity_type in seen_types:
+                    continue
+                seen_types.add(activity_type)
+                unique_activities.append(activity)
+            activities = unique_activities
             
             day_plan = {"warmup": [], "main_workout": [], "cooldown": []}
+            desired_main_count = sum(int(activity.get("target_count", 0) or 0) for activity in activities) or 6
             
             # Generate main workout exercises
             for activity in activities:
                 exercises = self._generate_activity_exercises(df, activity, ai_prescription, clinical_context)
-                if activity.get("type") == "cardio":
-                    day_plan["main_workout"].extend(exercises)
-                elif activity.get("type") == "resistance":
-                    day_plan["main_workout"].extend(exercises)
-                elif activity.get("type") == "hiit":
-                    day_plan["main_workout"].extend(exercises)
-                elif activity.get("type") == "yoga":
-                    day_plan["cooldown"].extend(exercises)
+                day_plan["main_workout"].extend(exercises)
             
             # Generate fixed warmup exercises
             day_plan["warmup"] = self._generate_warmup_exercises(df, activities_text, clinical_context)
@@ -806,7 +820,7 @@ class ExpertsNoteService:
                 activities_text=activities_text,
                 ai_prescription=ai_prescription,
                 clinical_context=clinical_context,
-                target_count=6,
+                target_count=desired_main_count,
             )
             
             plan[normalized_day_name] = self._build_structured_day_plan(
@@ -818,60 +832,46 @@ class ExpertsNoteService:
         
         return plan
 
-    def _parse_day_activities(self, activities_text: str) -> List[Dict[str, Any]]:
+    def _parse_day_activities(self, activities_text: str, ai_prescription: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Parse activity descriptions from daily schedule text.
         """
-        activities: List[Dict[str, Any]] = []
         text_lower = str(activities_text or "").lower()
-        duration_match = re.search(r'(\d+)(?:\s*-\s*(\d+))?\s*min', text_lower)
-        duration = int(duration_match.group(1)) if duration_match else 30
-        focus = "full"
-        if "upper" in text_lower:
-            focus = "upper"
-        elif "lower" in text_lower:
-            focus = "lower"
-        elif "core" in text_lower:
-            focus = "core"
-
-        has_strength = any(term in text_lower for term in ["weight", "weights", "resistance", "strength", "dumbbell", "band"])
-        has_cardio = any(term in text_lower for term in ["cardio", "hiit", "interval", "tabata", "circuit"])
+        has_cardio = "cardio" in text_lower
         has_yoga = "yoga" in text_lower
+        has_hiit = any(term in text_lower for term in ["hiit", "interval", "circuit"])
+        has_strength = any(term in text_lower for term in ["weight", "weights", "resistance", "strength", "dumbbell", "band"])
 
-        # For experts notes, keep the main workout to one dominant modality so days stay even and predictable.
-        if has_strength:
-            activities.append({
-                "type": "resistance",
-                "sets": 3,
-                "reps": "10-15",
-                "focus": focus,
-                "target_count": 6,
-                "description": "Resistance training",
-            })
+        ordered_types: List[Dict[str, Any]] = []
+
+        def _add(activity_type: str, **kwargs: Any) -> None:
+            if any(str(item.get("type", "")).lower() == activity_type for item in ordered_types):
+                return
+            payload = {"type": activity_type}
+            payload.update(kwargs)
+            ordered_types.append(payload)
+
+        if has_hiit and has_yoga:
+            _add("full_body_cardio", target_count=5)
+            _add("yoga", target_count=1)
+        elif has_hiit:
+            _add("full_body_cardio", target_count=5)
+        elif has_cardio and has_yoga:
+            _add("cardio", target_count=1)
+            _add("yoga", target_count=1)
+        elif has_strength and has_cardio:
+            _add("resistance", target_count=4, focus="full", paired_with="cardio")
+            _add("cardio", target_count=1)
+        elif has_strength:
+            _add("resistance", target_count=6, focus="full")
         elif has_cardio:
-            activities.append({
-                "type": "full_body_cardio",
-                "duration": duration,
-                "target_count": 6,
-                "description": "Full body cardio",
-            })
+            _add("cardio", target_count=1)
         elif has_yoga:
-            activities.append({
-                "type": "yoga",
-                "duration": duration,
-                "target_count": 6,
-                "description": "Yoga practice",
-            })
+            _add("yoga", target_count=1)
+        else:
+            _add("cardio", target_count=1)
 
-        if not activities:
-            activities.append({
-                "type": "full_body_cardio",
-                "duration": duration,
-                "target_count": 6,
-                "description": "Full body cardio",
-            })
-
-        return activities
+        return ordered_types
 
     def _generate_activity_exercises(self, df: pd.DataFrame, activity: Dict[str, Any], ai_prescription: Dict[str, Any], clinical_context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -884,8 +884,10 @@ class ExpertsNoteService:
         equipment_preferences = self._extract_available_equipment(ai_prescription)
 
         if activity_type == "resistance":
+            target_count = 4 if "cardio" in str(activity.get("paired_with", "")).lower() else target_count
             resistance_df = df[df["Primary Category"].str.lower().str.contains("strength|weight|resistance", na=False)].copy()
             resistance_df = resistance_df[~resistance_df["Tags"].str.contains("warm up|cooldown", na=False)]
+            resistance_df = self._filter_rows_by_required_equipment(resistance_df, ai_prescription)
             safe_df = resistance_df[resistance_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
             if safe_df.empty:
                 safe_df = resistance_df
@@ -895,9 +897,14 @@ class ExpertsNoteService:
             for _, row in selected_rows.iterrows():
                 exercises.append(self._format_exercise_from_dataset(row, "resistance"))
 
+        elif activity_type == "cardio":
+            exercises.append(self._build_session_payload({"session_type": "cardio"}, ai_prescription))
+
         elif activity_type == "full_body_cardio":
+            target_count = 5
             cardio_df = df[df["Primary Category"].str.lower().str.contains("cardio", na=False)].copy()
             cardio_df = cardio_df[~cardio_df["Tags"].str.contains("warm up|cooldown", na=False)]
+            cardio_df = self._filter_rows_by_required_equipment(cardio_df, ai_prescription, cardio_mode=True)
             safe_df = cardio_df[cardio_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
             if safe_df.empty:
                 safe_df = cardio_df
@@ -907,15 +914,7 @@ class ExpertsNoteService:
                 exercises.append(self._format_exercise_from_dataset(row, "cardio"))
 
         elif activity_type == "yoga":
-            yoga_df = df[df["Primary Category"].str.lower().str.contains("flexibility|stretching|mobility|yoga", na=False)].copy()
-            yoga_df = yoga_df[~yoga_df["Tags"].str.contains("warm up|cooldown", na=False)]
-            safe_df = yoga_df[yoga_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
-            if safe_df.empty:
-                safe_df = yoga_df
-
-            selected_rows = self._pick_distinct_rows(safe_df, target_count)
-            for _, row in selected_rows.iterrows():
-                exercises.append(self._format_exercise_from_dataset(row, "yoga"))
+            exercises.append(self._build_session_payload({"session_type": "yoga"}, ai_prescription))
 
         return exercises
         """
@@ -1086,11 +1085,19 @@ class ExpertsNoteService:
             activity_types.append("full_body_cardio")
         if "yoga" in normalized_activity_text:
             activity_types.append("yoga")
+        if "pilates" in normalized_activity_text:
+            activity_types.append("pilates")
 
         unique_activities = list(dict.fromkeys(activity_types))
 
         if "full_body_cardio" in unique_activities:
             category = "Full Body Cardio"
+        elif "strength" in unique_activities and "cardio" in unique_activities:
+            category = "Strength + Cardio"
+        elif "yoga" in unique_activities and "cardio" in unique_activities:
+            category = "Yoga + Cardio"
+        elif "pilates" in unique_activities and "cardio" in unique_activities:
+            category = "Pilates + Cardio"
         elif "cardio" in unique_activities and "strength" not in unique_activities:
             category = "Cardio Day"
         elif "strength" in unique_activities:
@@ -1105,7 +1112,9 @@ class ExpertsNoteService:
             else:
                 category = "Strength Day"
         elif "yoga" in unique_activities:
-            category = "Yoga Mobility"
+            category = "Yoga"
+        elif "pilates" in unique_activities:
+            category = "Pilates"
         elif normalized_activity_text.strip():
             category = normalized_activity_text.strip().title()
         else:
@@ -1174,6 +1183,12 @@ class ExpertsNoteService:
         equipment_preferences = self._extract_available_equipment(ai_prescription)
         existing_names = {str(ex.get("name", "")).strip().lower() for ex in existing if str(ex.get("name", "")).strip()}
         normalized_text = str(activities_text or "").lower()
+        session_blocks = [ex for ex in existing if ex.get("_is_session_payload")]
+        existing_non_session_names = {
+            str(ex.get("name", "")).strip().lower()
+            for ex in existing
+            if str(ex.get("name", "")).strip() and not ex.get("_is_session_payload")
+        }
 
         if any(term in normalized_text for term in ["strength", "resistance", "weights", "dumbbell", "band"]):
             fallback_section = "resistance"
@@ -1187,14 +1202,14 @@ class ExpertsNoteService:
 
         for _, row in fallback_rows.iterrows():
             row_name = str(row.get("Exercise Name", "")).strip().lower()
-            if not row_name or row_name in existing_names:
+            if not row_name or row_name in existing_non_session_names:
                 continue
             existing.append(self._format_exercise_from_dataset(row, fallback_section))
-            existing_names.add(row_name)
+            existing_non_session_names.add(row_name)
             if len(existing) >= target_count:
                 break
 
-        return existing[:target_count]
+        return session_blocks + [ex for ex in existing if not ex.get("_is_session_payload")][:max(0, target_count - len(session_blocks))]
 
     def _section_duration_label(self, exercises: List[Dict[str, Any]]) -> str:
         total_sec = sum(int(ex.get("est_time_sec", 0) or 0) for ex in exercises)
@@ -1207,26 +1222,261 @@ class ExpertsNoteService:
         normalized = str(activities_text or "").strip().lower()
         return normalized in {"rest", "rest day", "rest or bike ride/brisk walk"}
 
+    def _extract_duration_minutes(self, text: Any, default: int = 30) -> int:
+        normalized = str(text or "").lower()
+        duration_match = re.search(r'(\d+)(?:\s*-\s*(\d+))?\s*min', normalized)
+        return int(duration_match.group(1)) if duration_match else default
+
+    def _apply_session_directives(
+        self,
+        day_name: str,
+        activities: List[Dict[str, Any]],
+        ai_prescription: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        directives = ai_prescription.get("session_directives", [])
+        if not isinstance(directives, list):
+            return activities
+
+        updated = list(activities)
+        normalized_day = str(day_name).strip().lower()
+        for directive in directives:
+            if not isinstance(directive, dict):
+                continue
+            directive_day = str(directive.get("day", "")).strip().lower()
+            if directive_day != normalized_day:
+                continue
+
+            session_type = str(directive.get("session_type", "")).strip().lower()
+            if not session_type:
+                continue
+
+            mapped_type = "full_body_cardio" if session_type in {"hiit", "interval", "circuit"} else session_type
+            matched = False
+            for activity in updated:
+                if str(activity.get("type", "")).strip().lower() == mapped_type:
+                    activity["label"] = str(directive.get("label") or directive.get("instruction") or activity.get("label") or "").strip()
+                    activity["instruction"] = str(directive.get("instruction") or activity.get("instruction") or "").strip()
+                    activity["duration"] = int(directive.get("duration_min") or activity.get("duration") or 30)
+                    matched = True
+                    break
+
+            if not matched:
+                updated.append({
+                    "type": mapped_type,
+                    "duration": int(directive.get("duration_min") or 30),
+                    "label": str(directive.get("label") or directive.get("instruction") or "Workout Session").strip(),
+                    "instruction": str(directive.get("instruction") or "").strip(),
+                })
+
+        return updated
+
     def _extract_available_equipment(self, ai_prescription: Dict[str, Any]) -> List[str]:
         equipment_items: List[str] = []
+
+        for item in ai_prescription.get("equipment_required", []) or []:
+            equipment_items.append(str(item or ""))
 
         resistance_training = ai_prescription.get("resistance_training", {})
         if isinstance(resistance_training, dict):
             equipment_items.append(str(resistance_training.get("equipment", "") or ""))
 
+        cardio_requirements = ai_prescription.get("cardio_requirements", {})
+        if isinstance(cardio_requirements, dict):
+            for item in cardio_requirements.get("activities", []) or []:
+                equipment_items.append(str(item or ""))
+
         for exercise in ai_prescription.get("prescribed_exercises", []) or []:
             if isinstance(exercise, dict):
                 equipment_items.append(str(exercise.get("equipment", "") or ""))
 
-        equipment_text = " ".join(item.lower() for item in equipment_items if item)
         normalized: List[str] = []
-        if any(term in equipment_text for term in ["dumbbell", "db"]):
-            normalized.append("dumbbell")
-        if any(term in equipment_text for term in ["resistance band", "band", "rb"]):
-            normalized.append("resistance band")
-        if any(term in equipment_text for term in ["bodyweight", "no equipment"]):
-            normalized.append("bodyweight")
+        for raw_item in equipment_items:
+            normalized_item = self._normalize_equipment_label(raw_item)
+            if normalized_item and normalized_item not in normalized:
+                normalized.append(normalized_item)
         return normalized or ["bodyweight"]
+
+    def _extract_session_defaults(self, ai_prescription: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        defaults: Dict[str, Dict[str, Any]] = {}
+        for session in ai_prescription.get("session_types", []) or []:
+            if not isinstance(session, dict):
+                continue
+            session_type = str(session.get("type", "")).strip().lower()
+            if session_type:
+                defaults[session_type] = session
+        return defaults
+
+    def _extract_day_type_rules(self, ai_prescription: Dict[str, Any]) -> Dict[str, str]:
+        rules: Dict[str, str] = {}
+        for rule in ai_prescription.get("day_type_rules", []) or []:
+            if not isinstance(rule, dict):
+                continue
+            src = str(rule.get("type", "")).strip().lower()
+            mapped = str(rule.get("mapped_to", "")).strip().lower()
+            if src and mapped:
+                rules[src] = mapped
+        return rules
+
+    def _resolve_session_label(self, session_type: str, session_defaults: Dict[str, Dict[str, Any]], fallback: str) -> str:
+        session_info = session_defaults.get(str(session_type).lower(), {})
+        return str(session_info.get("label") or fallback or "Workout Session").strip()
+
+    def _resolve_session_duration(self, session_type: str, session_defaults: Dict[str, Dict[str, Any]], fallback: int) -> int:
+        session_info = session_defaults.get(str(session_type).lower(), {})
+        try:
+            return int(session_info.get("duration") or fallback)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _normalize_equipment_label(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        mapping = {
+            "db": "dumbbell",
+            "dumbbells": "dumbbell",
+            "dumbbell": "dumbbell",
+            "rb": "resistance band",
+            "band": "resistance band",
+            "bands": "resistance band",
+            "resistance band": "resistance band",
+            "treadmill": "treadmill",
+            "bike": "cycling",
+            "cycle": "cycling",
+            "cycling": "cycling",
+            "spin bike": "cycling",
+            "spinning": "cycling",
+            "elliptical": "elliptical",
+            "brisk walking": "brisk walking",
+            "walking": "brisk walking",
+            "bodyweight": "bodyweight",
+            "no equipment": "bodyweight",
+        }
+        for key, mapped in mapping.items():
+            if key in text:
+                return mapped
+        return text
+
+    def _filter_rows_by_required_equipment(
+        self,
+        rows: pd.DataFrame,
+        ai_prescription: Dict[str, Any],
+        cardio_mode: bool = False,
+    ) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+
+        required_equipment = self._extract_available_equipment(ai_prescription)
+        strict_equipment = [item for item in required_equipment if item != "bodyweight"]
+        if not strict_equipment:
+            return rows
+
+        def matches(row: pd.Series) -> bool:
+            row_equipment = self._normalize_equipment_label(row.get("Equipments", ""))
+            if cardio_mode:
+                return any(item in row_equipment for item in strict_equipment if item in {"treadmill", "elliptical", "cycling"})
+            return any(item in row_equipment for item in strict_equipment)
+
+        filtered = rows[rows.apply(matches, axis=1)]
+        if not filtered.empty:
+            return filtered
+
+        bodyweight_rows = rows[rows["Equipments"].astype(str).str.lower().str.contains("bodyweight", na=False)]
+        return bodyweight_rows if not bodyweight_rows.empty else rows
+
+    def _choose_cardio_mode(self, ai_prescription: Dict[str, Any]) -> str:
+        required_equipment = self._extract_available_equipment(ai_prescription)
+        cardio_requirements = ai_prescription.get("cardio_requirements", {})
+        activities = cardio_requirements.get("activities", []) if isinstance(cardio_requirements, dict) else []
+        allowed_modes = [
+            ("treadmill", "Treadmill"),
+            ("elliptical", "Elliptical"),
+            ("cycling", "Cycling"),
+            ("brisk walking", "Brisk Walking"),
+        ]
+
+        for normalized_key, label in allowed_modes:
+            if normalized_key in required_equipment:
+                return label
+
+        for activity in activities or []:
+            normalized_activity = self._normalize_equipment_label(activity)
+            for normalized_key, label in allowed_modes:
+                if normalized_activity == normalized_key:
+                    return label
+
+        return "Brisk Walking"
+
+    def _build_session_payload(self, activity: Dict[str, Any], ai_prescription: Dict[str, Any]) -> Dict[str, Any]:
+        session_type = str(activity.get("session_type") or activity.get("type") or "session").lower()
+        duration = int(activity.get("duration") or 30)
+        session_defaults = self._extract_session_defaults(ai_prescription)
+        default_label_map = {
+            "cardio": "Cardio Session",
+            "full_body_cardio": "Full Body Cardio",
+            "yoga": "Yoga Session",
+            "pilates": "Pilates Session",
+        }
+        label = str(activity.get("label") or "").strip() or self._resolve_session_label(
+            session_type,
+            session_defaults,
+            default_label_map.get(session_type, "Workout Session"),
+        )
+        duration = int(activity.get("duration") or self._resolve_session_duration(session_type, session_defaults, duration) or 30)
+
+        if session_type in {"cardio", "full_body_cardio"}:
+            mode_name = self._choose_cardio_mode(ai_prescription)
+            name = f"{label} ({mode_name})"
+            benefit = "Cardiorespiratory conditioning and calorie burn"
+            instruction = str(activity.get("instruction") or f"Perform {mode_name} continuously for {duration} minutes as prescribed in the note.").strip()
+            equipment = mode_name
+            met_value = 4.0
+        elif session_type == "yoga":
+            name = label
+            benefit = "Improves flexibility, mobility, and recovery"
+            instruction = str(activity.get("instruction") or f"{label} for {duration} minutes as prescribed in the note.").strip()
+            equipment = ""
+            met_value = 3.0
+        elif session_type == "pilates":
+            name = label
+            benefit = "Improves core control, posture, and mobility"
+            instruction = str(activity.get("instruction") or f"{label} for {duration} minutes as prescribed in the note.").strip()
+            equipment = ""
+            met_value = 3.0
+        else:
+            name = label
+            benefit = "Structured guided session"
+            instruction = str(activity.get("instruction") or f"Complete {label} for {duration} minutes.").strip()
+            equipment = ""
+            met_value = 3.0
+
+        estimated_calories = max(1, round(duration * 5))
+        return {
+            "name": name,
+            "exercise_name": name,
+            "sets": "1",
+            "reps": f"{duration} min",
+            "category": "session",
+            "equipment": equipment,
+            "benefit": benefit,
+            "health_benefits": benefit,
+            "safety_cue": "Follow coach guidance and maintain comfortable effort",
+            "safety_notes": "Follow coach guidance and maintain comfortable effort",
+            "steps": [instruction],
+            "steps_to_perform": instruction,
+            "rest": "As needed",
+            "rest_time": "As needed",
+            "intensity_rpe": "RPE 4-7",
+            "estimated_calories": estimated_calories,
+            "est_calories": f"Est: {estimated_calories} Cal",
+            "est_time_sec": duration * 60,
+            "est_time_human": self._humanize_seconds(duration * 60),
+            "planned_sets_count": 1,
+            "planned_total_cal": estimated_calories,
+            "met_value": met_value,
+            "_is_session_payload": True,
+            "_session_type": session_type,
+        }
 
     def _rank_rows_by_equipment(self, rows: pd.DataFrame, equipment_preferences: List[str]) -> pd.DataFrame:
         if rows.empty:
@@ -1265,6 +1515,12 @@ class ExpertsNoteService:
     ) -> pd.DataFrame:
         """Build a ranked fallback pool when the first pass under-fills a day."""
         non_support_df = df[~df["Tags"].str.contains("warm up|cooldown", na=False)].copy()
+        ai_equipment_payload = {"equipment_required": equipment_preferences}
+        non_support_df = self._filter_rows_by_required_equipment(
+            non_support_df,
+            ai_equipment_payload,
+            cardio_mode=(preferred_mode == "cardio"),
+        )
         safe_df = non_support_df[non_support_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
         if safe_df.empty:
             safe_df = non_support_df
@@ -1303,6 +1559,13 @@ class ExpertsNoteService:
             return rows
 
         ranked = self._rank_rows_by_equipment(rows, equipment_preferences)
+        preferred_rows = ranked[
+            ranked["Equipments"].astype(str).str.lower().apply(
+                lambda value: any(pref in value for pref in equipment_preferences if pref != "bodyweight")
+            )
+        ]
+        if not preferred_rows.empty:
+            ranked = pd.concat([preferred_rows, ranked]).drop_duplicates(subset=["Exercise Name"], keep="first")
         body_region = ranked["Body Region"].astype(str).str.lower()
 
         upper_rows = ranked[body_region.str.contains("upper|shoulder|arm|chest|back", na=False)]
