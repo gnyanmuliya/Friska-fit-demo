@@ -125,6 +125,7 @@ class FitnessDataset:
         os.path.join(BASE_DIR, "fitness.csv"),
         os.path.join(DATASETS_DIR, "fitness.csv"),
         os.path.join(DATASETS_DIR, "Newdata 1.csv"),
+        os.path.join(os.path.dirname(BASE_DIR), "dataset", "fitness.csv"),  # Project root dataset
     ]
 
     @classmethod
@@ -210,7 +211,7 @@ class FitnessDataset:
         if not found_path:
             try:
                 candidates: List[str] = []
-                search_dirs = [BASE_DIR, DATASETS_DIR]
+                search_dirs = [BASE_DIR, DATASETS_DIR, os.path.join(BASE_DIR, "..", "dataset")]  # Add project root dataset
                 for search_dir in search_dirs:
                     if not os.path.isdir(search_dir):
                         continue
