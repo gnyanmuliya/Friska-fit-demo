@@ -30,7 +30,7 @@ st.markdown(
 
 mode = st.radio(
     "Menu",
-    ["Fitness Plan Generator", "Experts Note Plan"],
+    ["Fitness Plan Generator", "Wellness Experts Note based Plan"],
     horizontal=True,
     label_visibility="collapsed",
 )

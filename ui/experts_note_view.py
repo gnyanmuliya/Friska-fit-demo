@@ -64,7 +64,7 @@ def _load_sample_note_cards(service: ExpertsNoteService) -> None:
 
 
 def render_experts_note_view() -> None:
-    st.markdown("## Expert / Doctor Notes Plan")
+    st.markdown("## Wellness Expert Notes based Plan")
     st.caption("Upload expert or doctor notes, or use the sample-note panel, to generate a personalized workout plan using default health parameters.")
 
     # Initialize every widget-backed key before any widgets are instantiated.
