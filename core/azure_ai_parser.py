@@ -4,8 +4,13 @@ import logging
 import os
 from typing import Dict, Any, List
 from openai import AzureOpenAI
+from json_repair import repair_json
 
 logger = logging.getLogger(__name__)
+
+
+class AzureAIParseError(RuntimeError):
+    """Raised when Azure AI returns a response that cannot be parsed as JSON."""
 
 class AzureAIPrescriptionParser:
     def __init__(self):
@@ -25,11 +30,37 @@ class AzureAIPrescriptionParser:
             model=self.model,
             messages=[{"role": "system", "content": "You are a clinical fitness expert."}, {"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=6000,
             response_format={"type": "json_object"}
         )
         content = response.choices[0].message.content
-        return json.loads(content)
+        finish_reason = response.choices[0].finish_reason
+        return self._parse_json_response(content, finish_reason)
+
+    def _parse_json_response(self, content: str | None, finish_reason: str | None = None) -> Dict[str, Any]:
+        if not content or not content.strip():
+            raise AzureAIParseError("Azure AI returned an empty response. Please try generating the plan again.")
+
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as original_error:
+            try:
+                repaired_content = repair_json(content)
+                parsed = json.loads(repaired_content)
+                logger.warning("[AzureAIPrescriptionParser] Repaired malformed Azure AI JSON response.")
+            except Exception as repair_error:
+                if finish_reason == "length":
+                    raise AzureAIParseError(
+                        "Azure AI response was too long and got cut off. Please shorten the note or try again."
+                    ) from repair_error
+                raise AzureAIParseError(
+                    "Azure AI returned invalid JSON. Please try generating the plan again."
+                ) from original_error
+
+        if not isinstance(parsed, dict):
+            raise AzureAIParseError("Azure AI returned JSON in an unexpected format. Please try again.")
+
+        return parsed
 
     def _get_parsing_prompt(self, notes_text: str) -> str:
         """
