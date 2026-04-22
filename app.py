@@ -3,7 +3,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ui.shared_components import render_global_styles
-from ui.soap_testing_view import render_soap_testing_view
 from ui.workout_generator_view import render_workout_generator_view
 from ui.experts_note_view import render_experts_note_view
 
@@ -31,14 +30,12 @@ st.markdown(
 
 mode = st.radio(
     "Menu",
-    ["Fitness Plan Generator", "SOAP Note Based Plan", "Experts Note Plan"],
+    ["Fitness Plan Generator", "Experts Note Plan"],
     horizontal=True,
     label_visibility="collapsed",
 )
 
 if mode == "Fitness Plan Generator":
     render_workout_generator_view()
-elif mode == "SOAP Note Based Plan":
-    render_soap_testing_view()
 else:
     render_experts_note_view()

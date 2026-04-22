@@ -3,3 +3,5 @@ pandas
 pdfplumber
 pydantic
 python-dotenv
+openai
+json_repair
