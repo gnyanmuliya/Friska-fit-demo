@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 import pandas as pd
 
-from core.azure_ai_parser import AzureAIPrescriptionParser
+from core.azure_ai_parser import AzureAIContentFilterError, AzureAIPrescriptionParser
 from core.fitness import (
     ExerciseFilter,
     FitnessDataset,
@@ -331,6 +331,169 @@ class ExpertsNoteService:
             }
         }
 
+    def _build_local_prescription(self, notes_text: str) -> Dict[str, Any]:
+        """Create a safe structured prescription without calling Azure AI."""
+        clinical = self._parse_clinical_context(notes_text)
+        schedule = self._extract_weekly_schedule_from_text(notes_text)
+        modalities = self._infer_modalities_from_text(notes_text)
+        equipment = self._infer_equipment_from_text(notes_text)
+        prescribed = clinical.get("prescribed_exercises", [])
+
+        if not schedule:
+            default_activity = self._activity_label_from_modalities(modalities)
+            schedule = {
+                "monday": default_activity,
+                "wednesday": default_activity,
+                "friday": default_activity,
+                "sunday": "Rest",
+            }
+
+        active_days = [
+            day for day, activity in schedule.items()
+            if not self._is_rest_day_text(activity)
+        ]
+
+        return {
+            "days_per_week": len(active_days) or 3,
+            "session_duration": self._extract_duration_label(notes_text),
+            "goal": self._infer_goal_from_text(notes_text),
+            "focus": modalities or ["mobility", "strength"],
+            "medical_conditions": clinical.get("medical_conditions", []),
+            "physical_limitations": clinical.get("physical_limitations", []),
+            "activity_restrictions": clinical.get("restrictions", []),
+            "intensity": self._infer_intensity_from_text(notes_text),
+            "prescribed_exercises": prescribed,
+            "avoid_exercises": [],
+            "equipment_required": equipment,
+            "target_body_parts": self._infer_target_body_parts(notes_text),
+            "weekly_schedule": schedule,
+            "session_directives": [],
+            "session_types": [],
+            "day_type_rules": [
+                {"type": "hiit", "mapped_to": "full_body_cardio"},
+                {"type": "interval", "mapped_to": "full_body_cardio"},
+                {"type": "circuit", "mapped_to": "full_body_cardio"},
+            ],
+            "cardio_requirements": {
+                "frequency": "2-3x per week",
+                "duration": self._extract_duration_label(notes_text),
+                "activities": ["Walking"] if "cardio" not in modalities else ["Walking", "Treadmill"],
+            },
+            "resistance_training": {
+                "frequency": "2-3x per week",
+                "equipment": ", ".join(equipment),
+                "sets": 2,
+                "reps": "10-15",
+                "exercises": [item.get("name", "") for item in prescribed if isinstance(item, dict)],
+            },
+            "hiit_training": {
+                "frequency": "1-2x per week",
+                "duration": "20-30 mins",
+                "structure": "5-6 exercises at controlled intervals",
+            },
+            "additional_requirements": {},
+            "_source": "local_fallback",
+        }
+
+    def _extract_weekly_schedule_from_text(self, notes_text: str) -> Dict[str, str]:
+        schedule: Dict[str, str] = {}
+        day_pattern = re.compile(
+            r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b\s*[:\-]?\s*(.*)",
+            re.IGNORECASE,
+        )
+        for raw_line in str(notes_text or "").splitlines():
+            line = raw_line.strip()
+            match = day_pattern.search(line)
+            if not match:
+                continue
+            day = match.group(1).lower()
+            activity = match.group(2).strip() or self._activity_label_from_modalities(self._infer_modalities_from_text(notes_text))
+            schedule[day] = activity
+        return schedule
+
+    def _infer_modalities_from_text(self, notes_text: str) -> List[str]:
+        text = str(notes_text or "").lower()
+        modalities: List[str] = []
+        checks = [
+            ("full_body_cardio", ["hiit", "interval", "tabata", "circuit"]),
+            ("cardio", ["cardio", "walk", "treadmill", "bike", "elliptical"]),
+            ("resistance", ["strength", "resistance", "weights", "dumbbell", "band", "push", "squat", "lunge"]),
+            ("pilates", ["pilates", "hundred", "roll up", "single leg stretch"]),
+            ("yoga", ["yoga", "child pose", "cobra", "downward"]),
+            ("mobility", ["mobility", "stretch", "warm-up", "warm up"]),
+        ]
+        for modality, keywords in checks:
+            if any(keyword in text for keyword in keywords):
+                modalities.append(modality)
+        return modalities
+
+    def _activity_label_from_modalities(self, modalities: List[str]) -> str:
+        if "full_body_cardio" in modalities:
+            return "HIIT/Interval"
+        if "pilates" in modalities:
+            return "Pilates and Mobility"
+        if "yoga" in modalities:
+            return "Yoga and Mobility"
+        if "resistance" in modalities and "cardio" in modalities:
+            return "Cardio and Resistance Training"
+        if "resistance" in modalities:
+            return "Resistance Training"
+        if "cardio" in modalities:
+            return "Cardio"
+        return "Mobility and Strength"
+
+    def _infer_equipment_from_text(self, notes_text: str) -> List[str]:
+        text = str(notes_text or "").lower()
+        equipment: List[str] = []
+        equipment_checks = [
+            ("dumbbell", ["dumbbell", "db ", " lbs", " lb "]),
+            ("resistance band", ["resistance band", "banded", " band "]),
+            ("treadmill", ["treadmill"]),
+            ("cycling", ["bike", "cycle", "cycling"]),
+            ("elliptical", ["elliptical"]),
+        ]
+        for label, keywords in equipment_checks:
+            if any(keyword in text for keyword in keywords):
+                equipment.append(label)
+        return equipment or ["bodyweight"]
+
+    def _extract_duration_label(self, notes_text: str) -> str:
+        match = re.search(r"(\d{1,3})(?:\s*-\s*(\d{1,3}))?\s*(?:min|mins|minutes)\b", str(notes_text or ""), re.IGNORECASE)
+        if not match:
+            return "30-45 minutes"
+        if match.group(2):
+            return f"{match.group(1)}-{match.group(2)} minutes"
+        return f"{match.group(1)} minutes"
+
+    def _infer_goal_from_text(self, notes_text: str) -> str:
+        text = str(notes_text or "").lower()
+        if any(term in text for term in ["weight loss", "fat loss", "calorie"]):
+            return "Weight Loss"
+        if any(term in text for term in ["rehab", "pain", "injury", "therapy"]):
+            return "Rehabilitation"
+        if any(term in text for term in ["strength", "resistance"]):
+            return "Strength"
+        return "General Fitness"
+
+    def _infer_intensity_from_text(self, notes_text: str) -> str:
+        text = str(notes_text or "").lower()
+        if any(term in text for term in ["vigorous", "hard", "high intensity", "hiit"]):
+            return "high"
+        if any(term in text for term in ["gentle", "easy", "light", "mobility", "stretch"]):
+            return "low"
+        return "moderate"
+
+    def _infer_target_body_parts(self, notes_text: str) -> List[str]:
+        text = str(notes_text or "").lower()
+        targets: List[str] = []
+        if any(term in text for term in ["upper", "shoulder", "arm", "chest", "back"]):
+            targets.append("Upper")
+        if any(term in text for term in ["lower", "hip", "knee", "leg", "glute", "ankle"]):
+            targets.append("Lower")
+        if any(term in text for term in ["core", "spine", "ab", "pilates", "hundred"]):
+            targets.append("Core")
+        return targets or ["Full Body"]
+
     def generate_plan_from_notes(self, notes_text: str) -> Dict[str, Any]:
         """
         Generate a complete workout plan from expert notes using AI parsing and dataset-driven generation.
@@ -351,8 +514,15 @@ class ExpertsNoteService:
         if not notes_text or not notes_text.strip():
             raise ValueError("No notes provided")
 
-        # STEP 1: Parse clinical context using Azure AI
-        ai_prescription = self.ai_parser.parse_notes(notes_text)
+        # STEP 1: Parse clinical context using Azure AI. If Azure content
+        # filtering blocks benign rehab/Pilates wording, fall back locally.
+        used_local_fallback = False
+        try:
+            ai_prescription = self.ai_parser.parse_notes(notes_text)
+        except AzureAIContentFilterError:
+            logger.warning("[ExpertsNoteService] Falling back to local note parser after Azure content filter block.")
+            ai_prescription = self._build_local_prescription(notes_text)
+            used_local_fallback = True
 
         # STEP 2: Load dataset and apply AI-derived filters
         df = FitnessDataset.load(str(DATASET_DIR / "fitness.csv"))
@@ -379,6 +549,7 @@ class ExpertsNoteService:
             "notes_text": notes_text,
             "ai_prescription": ai_prescription,
             "clinical_context": clinical_context,
+            "used_local_fallback": used_local_fallback,
         }
 
     def _verify_and_filter_plan(self, plan: Dict[str, dict], clinical_context: Dict[str, Any]) -> Dict[str, dict]:

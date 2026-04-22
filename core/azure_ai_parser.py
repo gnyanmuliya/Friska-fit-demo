@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from typing import Dict, Any, List
-from openai import AzureOpenAI
+from openai import AzureOpenAI, BadRequestError
 try:
     from json_repair import repair_json
 except ModuleNotFoundError:  # pragma: no cover
@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 
 class AzureAIParseError(RuntimeError):
     """Raised when Azure AI returns a response that cannot be parsed as JSON."""
+
+
+class AzureAIContentFilterError(RuntimeError):
+    """Raised when Azure blocks the request through content management policy."""
+
 
 class AzureAIPrescriptionParser:
     def __init__(self):
@@ -29,16 +34,32 @@ class AzureAIPrescriptionParser:
         if not notes_text:
             raise ValueError("No notes")
         prompt = self._get_parsing_prompt(notes_text)
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": "You are a clinical fitness expert."}, {"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=6000,
-            response_format={"type": "json_object"}
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You extract exercise-program structure into JSON for a fitness app."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=6000,
+                response_format={"type": "json_object"}
+            )
+        except BadRequestError as exc:
+            if self._is_content_filter_error(exc):
+                logger.warning("[AzureAIPrescriptionParser] Azure content filter blocked note parsing.")
+                raise AzureAIContentFilterError(
+                    "Azure blocked this note during AI parsing. The app will use the local rules-based parser instead."
+                ) from exc
+            raise
         content = response.choices[0].message.content
         finish_reason = response.choices[0].finish_reason
         return self._parse_json_response(content, finish_reason)
+
+    @staticmethod
+    def _is_content_filter_error(exc: BadRequestError) -> bool:
+        text = str(exc).lower()
+        return "content_filter" in text or "content management policy" in text
 
     def _parse_json_response(self, content: str | None, finish_reason: str | None = None) -> Dict[str, Any]:
         if not content or not content.strip():
