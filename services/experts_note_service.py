@@ -339,14 +339,7 @@ class ExpertsNoteService:
         equipment = self._infer_equipment_from_text(notes_text)
         prescribed = clinical.get("prescribed_exercises", [])
 
-        if not schedule:
-            default_activity = self._activity_label_from_modalities(modalities)
-            schedule = {
-                "monday": default_activity,
-                "wednesday": default_activity,
-                "friday": default_activity,
-                "sunday": "Rest",
-            }
+        schedule = self._expand_weekly_schedule_from_frequency(notes_text, schedule, modalities)
 
         active_days = [
             day for day, activity in schedule.items()
@@ -395,10 +388,156 @@ class ExpertsNoteService:
             "_source": "local_fallback",
         }
 
+    def _ensure_usable_weekly_schedule(self, ai_prescription: Dict[str, Any], notes_text: str) -> Dict[str, Any]:
+        """Expand sparse AI schedules when notes provide frequency rules instead of a sample week."""
+        prescription = dict(ai_prescription or {})
+        raw_schedule = prescription.get("weekly_schedule", {})
+        schedule = raw_schedule if isinstance(raw_schedule, dict) else {}
+        active_days = [
+            day for day, activity in schedule.items()
+            if activity and not self._is_rest_day_text(activity)
+        ]
+        has_frequency_rules = self._notes_have_frequency_rules(notes_text)
+
+        if len(active_days) < 3 and has_frequency_rules:
+            modalities = prescription.get("focus") if isinstance(prescription.get("focus"), list) else []
+            modalities = modalities or self._infer_modalities_from_text(notes_text)
+            schedule = self._expand_weekly_schedule_from_frequency(notes_text, schedule, modalities)
+            prescription["weekly_schedule"] = schedule
+            prescription["days_per_week"] = len([
+                day for day, activity in schedule.items()
+                if activity and not self._is_rest_day_text(activity)
+            ])
+        elif schedule:
+            prescription["weekly_schedule"] = self._normalize_weekly_schedule(schedule)
+        else:
+            modalities = self._infer_modalities_from_text(notes_text)
+            prescription["weekly_schedule"] = self._expand_weekly_schedule_from_frequency(notes_text, {}, modalities)
+            prescription["days_per_week"] = len([
+                day for day, activity in prescription["weekly_schedule"].items()
+                if activity and not self._is_rest_day_text(activity)
+            ])
+
+        return prescription
+
+    def _notes_have_frequency_rules(self, notes_text: str) -> bool:
+        text = str(notes_text or "").lower()
+        return bool(re.search(r"\b\d+\s*(?:-\s*\d+)?\s*x?\s*per\s+week\b", text)) or "daily" in text
+
+    def _normalize_weekly_schedule(self, schedule: Dict[str, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        day_aliases = {day.lower(): day.lower() for day in DAY_ORDER}
+        for raw_day, activity in schedule.items():
+            day = str(raw_day or "").strip().lower()
+            if day in day_aliases:
+                normalized[day] = str(activity or "").strip() or "Rest"
+        return normalized
+
+    def _expand_weekly_schedule_from_frequency(
+        self,
+        notes_text: str,
+        current_schedule: Dict[str, Any] | None,
+        modalities: List[str],
+    ) -> Dict[str, str]:
+        text = str(notes_text or "")
+        schedule = {day.lower(): [] for day in DAY_ORDER}
+
+        for day, activity in self._normalize_weekly_schedule(current_schedule or {}).items():
+            if activity and not self._is_rest_day_text(activity):
+                schedule.setdefault(day, []).extend(self._split_activity_label(activity))
+
+        yoga_days = self._extract_named_class_days(text, ["yoga", "hatha"])
+        for day in yoga_days:
+            schedule[day].append("Yoga")
+
+        cardio_count = self._extract_modality_frequency(text, ["cardio", "cardiovascular", "dance", "brisk walking", "hiking", "bike", "elliptical"], default=0)
+        pilates_count = self._extract_modality_frequency(text, ["pilates"], default=0)
+        mobility_count = self._extract_modality_frequency(text, ["stretching", "physioball", "abs"], default=0)
+        resistance_count = self._extract_modality_frequency(text, ["resistance", "weights", "bands", "body weight", "strength"], default=0)
+
+        if not any([cardio_count, pilates_count, mobility_count, resistance_count, yoga_days]):
+            default_activity = self._activity_label_from_modalities(modalities)
+            for day in ["monday", "wednesday", "friday"]:
+                schedule[day].append(default_activity)
+        else:
+            self._assign_activity_to_days(schedule, "Cardio", cardio_count, ["monday", "wednesday", "friday", "saturday", "tuesday", "thursday"])
+            self._assign_activity_to_days(schedule, "Resistance Training", resistance_count, ["monday", "wednesday", "saturday", "friday", "tuesday", "thursday"])
+            self._assign_activity_to_days(schedule, "Pilates", pilates_count, ["tuesday", "friday", "saturday", "thursday", "monday"])
+            self._assign_activity_to_days(schedule, "Mobility/Core", mobility_count, ["thursday", "saturday", "tuesday", "friday", "wednesday"])
+
+        normalized: Dict[str, str] = {}
+        for day in [item.lower() for item in DAY_ORDER]:
+            activities = list(dict.fromkeys(item for item in schedule.get(day, []) if item and not self._is_rest_day_text(item)))
+            normalized[day] = " and ".join(activities) if activities else "Rest"
+
+        active_count = sum(1 for activity in normalized.values() if not self._is_rest_day_text(activity))
+        if active_count == 0:
+            normalized.update({
+                "monday": self._activity_label_from_modalities(modalities),
+                "wednesday": self._activity_label_from_modalities(modalities),
+                "friday": self._activity_label_from_modalities(modalities),
+                "sunday": "Rest",
+            })
+        return normalized
+
+    def _split_activity_label(self, activity: Any) -> List[str]:
+        return [
+            part.strip()
+            for part in re.split(r"\s*(?:/|,|\band\b|\+)\s*", str(activity or ""), flags=re.IGNORECASE)
+            if part.strip()
+        ]
+
+    def _extract_modality_frequency(self, notes_text: str, keywords: List[str], default: int = 0) -> int:
+        text = re.sub(r"\s+", " ", str(notes_text or ""))
+        sentences = re.split(r"[\n.;]+", text)
+        best = default
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            if not any(keyword in sentence_lower for keyword in keywords):
+                continue
+            match = re.search(r"(\d+)\s*(?:-\s*(\d+))?\s*x?\s*per\s+week", sentence_lower)
+            if match:
+                low = int(match.group(1))
+                high = int(match.group(2) or low)
+                best = max(best, high)
+        return min(best, 6)
+
+    def _extract_named_class_days(self, notes_text: str, keywords: List[str]) -> List[str]:
+        days: List[str] = []
+        day_names = [day.lower() for day in DAY_ORDER]
+        for sentence in re.split(r"[\n.;]+", str(notes_text or "")):
+            sentence_lower = sentence.lower()
+            if not any(keyword in sentence_lower for keyword in keywords):
+                continue
+            for day in day_names:
+                if re.search(rf"\b{day}\b", sentence_lower) and day not in days:
+                    days.append(day)
+        return days
+
+    def _assign_activity_to_days(
+        self,
+        schedule: Dict[str, List[str]],
+        activity: str,
+        count: int,
+        preferred_days: List[str],
+    ) -> None:
+        if count <= 0:
+            return
+        assigned = 0
+        for day in preferred_days:
+            if assigned >= count:
+                break
+            day_activities = schedule.setdefault(day, [])
+            if activity in day_activities:
+                assigned += 1
+                continue
+            day_activities.append(activity)
+            assigned += 1
+
     def _extract_weekly_schedule_from_text(self, notes_text: str) -> Dict[str, str]:
         schedule: Dict[str, str] = {}
         day_pattern = re.compile(
-            r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b\s*[:\-]?\s*(.*)",
+            r"^\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b\s*[:\-]?\s*(.*)",
             re.IGNORECASE,
         )
         for raw_line in str(notes_text or "").splitlines():
@@ -523,6 +662,7 @@ class ExpertsNoteService:
             logger.warning("[ExpertsNoteService] Falling back to local note parser after Azure content filter block.")
             ai_prescription = self._build_local_prescription(notes_text)
             used_local_fallback = True
+        ai_prescription = self._ensure_usable_weekly_schedule(ai_prescription, notes_text)
 
         # STEP 2: Load dataset and apply AI-derived filters
         df = FitnessDataset.load(str(DATASET_DIR / "fitness.csv"))
@@ -551,6 +691,73 @@ class ExpertsNoteService:
             "clinical_context": clinical_context,
             "used_local_fallback": used_local_fallback,
         }
+
+    def extract_high_level_goals(self, notes_text: str) -> Dict[str, Any]:
+        """
+        Extract high-level program structure from expert notes.
+        Focus: Numbers, days, and general goals.
+        Avoids triggering body-related filters.
+        
+        Args:
+            notes_text: Raw text from expert/doctor notes
+            
+        Returns:
+            Dictionary with days_per_week, goal, weekly_schedule, and equipment_required
+        """
+        if not notes_text or not notes_text.strip():
+            raise ValueError("No notes provided")
+        
+        try:
+            result = self.ai_parser.extract_high_level_goals(notes_text)
+            logger.info("[ExpertsNoteService] Successfully extracted high-level goals")
+            return result
+        except Exception as e:
+            logger.error(f"[ExpertsNoteService] Error extracting high-level goals: {str(e)}")
+            raise
+
+    def extract_clinical_safety(self, notes_text: str) -> Dict[str, Any]:
+        """
+        Identify medical flags and exclusions from expert notes.
+        Focus: Medical terms and "Avoid" instructions.
+        
+        Args:
+            notes_text: Raw text from expert/doctor notes
+            
+        Returns:
+            Dictionary with medical_conditions, physical_limitations, activity_restrictions, and avoid_exercises
+        """
+        if not notes_text or not notes_text.strip():
+            raise ValueError("No notes provided")
+        
+        try:
+            result = self.ai_parser.extract_clinical_safety(notes_text)
+            logger.info("[ExpertsNoteService] Successfully extracted clinical safety information")
+            return result
+        except Exception as e:
+            logger.error(f"[ExpertsNoteService] Error extracting clinical safety: {str(e)}")
+            raise
+
+    def extract_exercise_repertoire(self, notes_text: str) -> Dict[str, Any]:
+        """
+        Extract specific exercises from expert notes using clinical names only.
+        Focus: Formal exercise names without vivid descriptions to avoid filter triggers.
+        
+        Args:
+            notes_text: Raw text from expert/doctor notes
+            
+        Returns:
+            Dictionary with prescribed_exercises list (name, sets, reps, type)
+        """
+        if not notes_text or not notes_text.strip():
+            raise ValueError("No notes provided")
+        
+        try:
+            result = self.ai_parser.extract_exercise_repertoire(notes_text)
+            logger.info("[ExpertsNoteService] Successfully extracted exercise repertoire")
+            return result
+        except Exception as e:
+            logger.error(f"[ExpertsNoteService] Error extracting exercise repertoire: {str(e)}")
+            raise
 
     def _verify_and_filter_plan(self, plan: Dict[str, dict], clinical_context: Dict[str, Any]) -> Dict[str, dict]:
         """
@@ -829,6 +1036,8 @@ class ExpertsNoteService:
         text_lower = str(activities_text or "").lower()
         has_cardio = "cardio" in text_lower
         has_yoga = "yoga" in text_lower
+        has_pilates = "pilates" in text_lower
+        has_mobility = any(term in text_lower for term in ["mobility", "stretch", "physioball", "core", "abs"])
         has_hiit = any(term in text_lower for term in ["hiit", "interval", "circuit"])
         has_strength = any(term in text_lower for term in ["weight", "weights", "resistance", "strength", "dumbbell", "band"])
 
@@ -846,6 +1055,14 @@ class ExpertsNoteService:
             _add("yoga", target_count=1)
         elif has_hiit:
             _add("full_body_cardio", target_count=5)
+        elif has_pilates and has_yoga:
+            _add("pilates", target_count=1)
+            _add("yoga", target_count=1)
+        elif has_pilates and has_cardio:
+            _add("cardio", target_count=1)
+            _add("pilates", target_count=1)
+        elif has_pilates:
+            _add("pilates", target_count=1)
         elif has_cardio and has_yoga:
             _add("cardio", target_count=1)
             _add("yoga", target_count=1)
@@ -858,6 +1075,8 @@ class ExpertsNoteService:
             _add("cardio", target_count=1)
         elif has_yoga:
             _add("yoga", target_count=1)
+        elif has_mobility:
+            _add("mobility", target_count=4)
         else:
             _add("cardio", target_count=1)
 
@@ -932,6 +1151,25 @@ class ExpertsNoteService:
 
         elif activity_type == "yoga":
             exercises.append(self._build_session_payload({"session_type": "yoga"}, ai_prescription))
+
+        elif activity_type == "pilates":
+            exercises.append(self._build_session_payload({"session_type": "pilates"}, ai_prescription))
+
+        elif activity_type == "mobility":
+            mobility_df = df[
+                df["Primary Category"].str.lower().str.contains("mobility|stretch|flexibility", na=False)
+            ].copy()
+            mobility_df = mobility_df[~mobility_df["Tags"].str.contains("warm up|cooldown", na=False)]
+            mobility_df = self._apply_strict_equipment_filter(mobility_df, profile)
+            safe_df = mobility_df[mobility_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
+            if safe_df.empty:
+                safe_df = mobility_df
+            safe_df = self._filter_rows_by_intensity_band(safe_df, ai_prescription)
+            safe_df = self._exclude_used_rows(safe_df, weekly_used_exercises, excluded_families)
+            selected_rows = self._pick_distinct_rows(self._rank_rows_by_equipment(safe_df, equipment_preferences), target_count, excluded_families=excluded_families)
+            selected_rows = self._sample_rows(selected_rows, target_count)
+            for _, row in selected_rows.iterrows():
+                exercises.append(self._format_exercise_from_dataset(row, "mobility"))
 
         return exercises
         """
@@ -1728,6 +1966,7 @@ class ExpertsNoteService:
             "full_body_cardio": "Full Body Cardio",
             "yoga": "Yoga Session",
             "pilates": "Pilates Session",
+            "mobility": "Mobility Session",
         }
         label = str(activity.get("label") or "").strip() or self._resolve_session_label(
             session_type,
