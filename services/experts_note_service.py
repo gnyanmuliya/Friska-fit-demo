@@ -427,10 +427,18 @@ class ExpertsNoteService:
     def _normalize_weekly_schedule(self, schedule: Dict[str, Any]) -> Dict[str, str]:
         normalized: Dict[str, str] = {}
         day_aliases = {day.lower(): day.lower() for day in DAY_ORDER}
+        
+        # First, add all days from the input schedule
         for raw_day, activity in schedule.items():
             day = str(raw_day or "").strip().lower()
             if day in day_aliases:
                 normalized[day] = str(activity or "").strip() or "Rest"
+        
+        # Ensure all 7 days are present, fill missing days with "Rest"
+        for day in [d.lower() for d in DAY_ORDER]:
+            if day not in normalized:
+                normalized[day] = "Rest"
+        
         return normalized
 
     def _expand_weekly_schedule_from_frequency(
