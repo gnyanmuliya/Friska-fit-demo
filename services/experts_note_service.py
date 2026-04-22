@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import random
 import re
 from typing import Any, Dict, List, Set
 
@@ -11,7 +13,6 @@ except ModuleNotFoundError:  # pragma: no cover
 
 import pandas as pd
 
-from core.azure_ai_parser import AzureAIPrescriptionParser
 from core.azure_ai_parser import AzureAIPrescriptionParser
 from core.fitness import (
     ExerciseFilter,
@@ -243,7 +244,7 @@ class ExpertsNoteService:
             "weekly_days": len(active_days),
             "days": active_days,
             "session_duration": ai_prescription.get("session_duration", "45-60 minutes"),
-            "available_equipment": ["Bodyweight Only"],  # Will be updated based on AI prescription
+            "available_equipment": self._display_equipment_list(self._extract_available_equipment(ai_prescription)),
             "workout_location": "Home",
             "target_body_parts": ai_prescription.get("target_body_parts", ["Full Body"]),
             "medical_conditions": ai_prescription.get("medical_conditions", []),
@@ -296,243 +297,6 @@ class ExpertsNoteService:
             flags["overhead_restricted"] = True
         
         return flags
-
-    def _generate_plan_from_weekly_schedule(self, df: pd.DataFrame, ai_prescription: Dict[str, Any], 
-                                           clinical_context: Dict[str, Any]) -> Dict[str, dict]:
-        """Generate workout plan following the exact weekly schedule from AI prescription."""
-        weekly_schedule = ai_prescription.get("weekly_schedule", {})
-        plan = {}
-        
-        # Import required classes
-        from core.fitness import ExerciseSelector, WorkoutComposer, DatasetRanker
-        
-        # Create selector and composer
-        selector = ExerciseSelector()
-        composer = WorkoutComposer(selector)
-        composer._dataset = df
-        composer._active_clinical_context = clinical_context
-        
-        # Match prescribed exercises
-        prescribed_exercises = self._match_prescribed_exercises(ai_prescription.get("prescribed_exercises", []))
-        
-        # Process each day in the schedule
-        for day_name, day_description in weekly_schedule.items():
-            day_name_cap = day_name.capitalize()
-            day_plan = {"warmup": [], "main_workout": [], "cooldown": []}
-            
-            if not day_description or day_description.lower() in ["rest", "rest or bike ride/brisk walk"]:
-                # Rest day or optional activity
-                plan[day_name_cap] = day_plan
-                continue
-            
-            # Parse day description to determine activities
-            activities = self._parse_day_activities(day_description, ai_prescription)
-            
-            # Generate exercises for each activity type
-            main_exercises = []
-            
-            for activity in activities:
-                activity_exercises = self._generate_activity_exercises(
-                    activity, df, ai_prescription, prescribed_exercises, selector, composer
-                )
-                main_exercises.extend(activity_exercises)
-            
-            day_plan["main_workout"] = main_exercises
-            
-            # Add basic warmup and cooldown
-            day_plan["warmup"] = self._get_basic_warmup_for_day(day_description)
-            day_plan["cooldown"] = self._get_basic_cooldown_for_day(day_description)
-            
-            plan[day_name_cap] = day_plan
-        
-        return plan
-
-    def _parse_day_activities(self, day_description: str, ai_prescription: Dict[str, Any]) -> List[str]:
-        """Parse day description to extract activity types."""
-        activities = []
-        desc_lower = day_description.lower()
-        
-        # Check for cardio
-        if "cardio" in desc_lower:
-            activities.append("cardio")
-        
-        # Check for weights/resistance
-        if any(term in desc_lower for term in ["weight", "weights", "resistance"]):
-            activities.append("resistance")
-        
-        # Check for HIIT/Interval
-        if any(term in desc_lower for term in ["hiit", "interval"]):
-            activities.append("hiit")
-        
-        # Check for yoga
-        if "yoga" in desc_lower:
-            activities.append("yoga")
-        
-        # If no specific activities found, default to cardio
-        if not activities:
-            activities.append("cardio")
-        
-        return activities
-
-    def _generate_activity_exercises(self, activity: str, df: pd.DataFrame, ai_prescription: Dict[str, Any],
-                                   prescribed_exercises: List[Dict[str, Any]], selector, composer) -> List[Dict[str, Any]]:
-        """Generate exercises for a specific activity type."""
-        exercises = []
-        
-        if activity == "cardio":
-            cardio_req = ai_prescription.get("cardio_requirements", {})
-            duration = cardio_req.get("duration", "45-60 minutes")
-            activities_list = cardio_req.get("activities", ["Walking", "Bike", "Elliptical"])
-            
-            # Select primary cardio activity
-            primary_activity = activities_list[0] if activities_list else "Walking"
-            
-            exercise = {
-                "name": primary_activity,
-                "sets": 1,
-                "reps": duration,
-                "category": "cardio",
-                "equipment": "Bodyweight",
-                "benefit": f"Cardiovascular exercise for {duration}",
-                "safety_cue": "Maintain moderate intensity",
-                "steps": "",
-                "body_region": "Full Body",
-                "primary_category": "Cardio",
-                "tags": "cardio",
-                "video_url": "",
-                "thumbnail_url": "",
-                "video_path": "",
-                "image_path": "",
-            }
-            exercises.append(exercise)
-            
-        elif activity == "resistance":
-            resistance_req = ai_prescription.get("resistance_training", {})
-            exercise_list = resistance_req.get("exercises", ["Chest press", "Rows", "Shoulder press", "Bicep curls", "Tricep extension", "Squat"])
-            sets = resistance_req.get("sets", 3)
-            reps = resistance_req.get("reps", "10-15")
-            equipment = resistance_req.get("equipment", "Bodyweight")
-            
-            # Use prescribed exercises if available, otherwise select from list
-            if prescribed_exercises:
-                for prescribed in prescribed_exercises:
-                    if any(term in prescribed["name"].lower() for term in ["press", "row", "curl", "extension", "squat"]):
-                        exercises.append(prescribed)
-            else:
-                # Select exercises from the dataset
-                for ex_name in exercise_list[:4]:  # Limit to 4 exercises
-                    matched = self._find_exercise_in_dataset(df, ex_name)
-                    if matched is not None:
-                        exercise = composer.format_exercise(
-                            matched, 
-                            sets=str(sets),
-                            reps=reps,
-                            rest="60 seconds",
-                            rpe="6-8"
-                        )
-                        exercises.append(exercise)
-                        
-        elif activity == "hiit":
-            hiit_req = ai_prescription.get("hiit_training", {})
-            duration = hiit_req.get("duration", "30-45 mins")
-            structure = hiit_req.get("structure", "8 rounds 20 seconds/10 seconds")
-            
-            # Create HIIT workout structure
-            exercise = {
-                "name": "HIIT Tabata Workout",
-                "sets": 8,
-                "reps": "20 seconds work/10 seconds rest",
-                "category": "hiit",
-                "equipment": "Bodyweight",
-                "benefit": f"High-intensity interval training for {duration}",
-                "safety_cue": "Alternate high and recovery intensity",
-                "steps": structure,
-                "body_region": "Full Body",
-                "primary_category": "HIIT",
-                "tags": "hiit, cardio",
-                "video_url": "",
-                "thumbnail_url": "",
-                "video_path": "",
-                "image_path": "",
-            }
-            exercises.append(exercise)
-            
-        elif activity == "yoga":
-            exercise = {
-                "name": "Yoga Class",
-                "sets": 1,
-                "reps": "60 minutes",
-                "category": "yoga",
-                "equipment": "Bodyweight",
-                "benefit": "Yoga for flexibility and stress relief",
-                "safety_cue": "Follow instructor guidance",
-                "steps": "",
-                "body_region": "Full Body",
-                "primary_category": "Mobility/Stretch",
-                "tags": "yoga, flexibility",
-                "video_url": "",
-                "thumbnail_url": "",
-                "video_path": "",
-                "image_path": "",
-            }
-            exercises.append(exercise)
-        
-        return exercises
-
-    def _find_exercise_in_dataset(self, df: pd.DataFrame, exercise_name: str):
-        """Find exercise in dataset by name."""
-        import difflib
-        
-        exercise_names = df["Exercise Name"].str.lower()
-        matches = difflib.get_close_matches(exercise_name.lower(), exercise_names, n=1, cutoff=0.6)
-        
-        if matches:
-            matched_name = matches[0]
-            return df[df["Exercise Name"].str.lower() == matched_name].iloc[0]
-        
-        return None
-
-    def _get_basic_warmup_for_day(self, day_description: str) -> List[Dict[str, Any]]:
-        """Get appropriate warmup for the day."""
-        desc_lower = day_description.lower()
-        
-        if "yoga" in desc_lower:
-            return [{
-                "name": "Gentle Yoga Warm-Up",
-                "sets": "1",
-                "reps": "5 minutes",
-                "category": "warmup",
-                "equipment": "Bodyweight",
-            }]
-        else:
-            return [{
-                "name": "Dynamic Warm-Up",
-                "sets": "1",
-                "reps": "5-10 minutes",
-                "category": "warmup",
-                "equipment": "Bodyweight",
-            }]
-
-    def _get_basic_cooldown_for_day(self, day_description: str) -> List[Dict[str, Any]]:
-        """Get appropriate cooldown for the day."""
-        desc_lower = day_description.lower()
-        
-        if "yoga" in desc_lower:
-            return [{
-                "name": "Yoga Cool-Down",
-                "sets": "1",
-                "reps": "5 minutes",
-                "category": "cooldown",
-                "equipment": "Bodyweight",
-            }]
-        else:
-            return [{
-                "name": "Static Stretching",
-                "sets": "1",
-                "reps": "5-10 minutes",
-                "category": "cooldown",
-                "equipment": "Bodyweight",
-            }]
 
     def _parse_clinical_context(self, notes_text: str) -> Dict[str, Any]:
         """
@@ -605,7 +369,7 @@ class ExpertsNoteService:
         df = self._exclude_avoided_exercises(df, ai_prescription.get("avoid_exercises", []))
 
         # STEP 3: Generate plan following the exact weekly schedule
-        plan = self._generate_plan_from_weekly_schedule(df, ai_prescription, clinical_context)
+        plan = self._generate_plan_from_weekly_schedule(df, ai_prescription, clinical_context, profile)
 
         logger.info(f"[ExpertsNoteService] Generated AI-driven plan with {len(plan)} days")
         
@@ -684,12 +448,16 @@ class ExpertsNoteService:
         """
         profile = {
             "goal": ai_prescription.get("goal", "General Fitness"),
+            "primary_goal": ai_prescription.get("goal", "General Fitness"),
             "fitness_level": "intermediate",  # Default
             "days_per_week": ai_prescription.get("days_per_week", 3),
             "session_duration": ai_prescription.get("session_duration", 45),
             "focus": ai_prescription.get("focus", []),
             "intensity": ai_prescription.get("intensity", "moderate"),
             "target_body_parts": ai_prescription.get("target_body_parts", []),
+            "available_equipment": self._display_equipment_list(self._extract_available_equipment(ai_prescription)),
+            "medical_conditions": ai_prescription.get("medical_conditions", []),
+            "physical_limitation": ", ".join(ai_prescription.get("physical_limitations", [])) if ai_prescription.get("physical_limitations") else "None",
         }
         return profile
 
@@ -759,14 +527,25 @@ class ExpertsNoteService:
         
         return df[df.apply(should_exclude, axis=1)]
 
-    def _generate_plan_from_weekly_schedule(self, df: pd.DataFrame, ai_prescription: Dict[str, Any], clinical_context: Dict[str, Any]) -> Dict[str, Any]:
+    def _generate_plan_from_weekly_schedule(
+        self,
+        df: pd.DataFrame,
+        ai_prescription: Dict[str, Any],
+        clinical_context: Dict[str, Any],
+        profile: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         """
         Generate workout plan following the exact weekly schedule from AI prescription.
         """
         weekly_schedule = ai_prescription.get("weekly_schedule", {})
         plan = {}
+        weekly_used_families: Set[str] = set()
+        weekly_used_exercises: Set[str] = set()
+        profile = profile or self._create_profile_from_ai(ai_prescription)
+        user_seed = self._get_user_seed(profile)
         
-        for day_name, activities_text in weekly_schedule.items():
+        for day_index, (day_name, activities_text) in enumerate(weekly_schedule.items()):
+            random.seed(user_seed + day_index)
             normalized_day_name = str(day_name).capitalize()
             if self._is_rest_day_text(activities_text):
                 plan[normalized_day_name] = self._build_structured_day_plan(
@@ -806,14 +585,38 @@ class ExpertsNoteService:
             
             # Generate main workout exercises
             for activity in activities:
-                exercises = self._generate_activity_exercises(df, activity, ai_prescription, clinical_context)
+                exercises = self._generate_activity_exercises(
+                    df,
+                    activity,
+                    ai_prescription,
+                    clinical_context,
+                    profile=profile,
+                    day_index=day_index,
+                    excluded_families=weekly_used_families,
+                    weekly_used_exercises=weekly_used_exercises,
+                )
                 day_plan["main_workout"].extend(exercises)
             
-            # Generate fixed warmup exercises
-            day_plan["warmup"] = self._generate_warmup_exercises(df, activities_text, clinical_context)
+            day_plan["main_workout"] = self._dedupe_exercise_variations(day_plan["main_workout"])
+            day_plan["main_workout"] = self._normalize_intensity(day_plan["main_workout"])
+
+            # Generate workout-specific warmup exercises with upper/lower variety.
+            day_plan["warmup"] = self._generate_warmup_exercises(
+                df,
+                activities_text,
+                clinical_context,
+                day_index=day_index,
+                main_workout=day_plan["main_workout"],
+            )
             
-            # Generate fixed cooldown exercises
-            day_plan["cooldown"] = self._generate_cooldown_exercises(df, activities_text, clinical_context)
+            # Generate workout-specific cooldown exercises with upper/lower variety.
+            day_plan["cooldown"] = self._generate_cooldown_exercises(
+                df,
+                activities_text,
+                clinical_context,
+                day_index=day_index,
+                main_workout=day_plan["main_workout"],
+            )
             day_plan["main_workout"] = self._ensure_uniform_main_workout(
                 df=df,
                 day_plan=day_plan,
@@ -821,6 +624,22 @@ class ExpertsNoteService:
                 ai_prescription=ai_prescription,
                 clinical_context=clinical_context,
                 target_count=desired_main_count,
+                day_index=day_index,
+                excluded_families=weekly_used_families,
+                weekly_used_exercises=weekly_used_exercises,
+                profile=profile,
+            )
+            day_plan["main_workout"] = self._dedupe_exercise_variations(day_plan["main_workout"])
+            day_plan["main_workout"] = self._normalize_intensity(day_plan["main_workout"])
+            weekly_used_families.update(
+                self._exercise_family(ex.get("name", ""))
+                for ex in day_plan["main_workout"]
+                if not ex.get("_is_session_payload")
+            )
+            weekly_used_exercises.update(
+                self._exercise_key(ex.get("name", ""))
+                for ex in day_plan["main_workout"]
+                if not ex.get("_is_session_payload")
             )
             
             plan[normalized_day_name] = self._build_structured_day_plan(
@@ -873,7 +692,17 @@ class ExpertsNoteService:
 
         return ordered_types
 
-    def _generate_activity_exercises(self, df: pd.DataFrame, activity: Dict[str, Any], ai_prescription: Dict[str, Any], clinical_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _generate_activity_exercises(
+        self,
+        df: pd.DataFrame,
+        activity: Dict[str, Any],
+        ai_prescription: Dict[str, Any],
+        clinical_context: Dict[str, Any],
+        profile: Dict[str, Any] | None = None,
+        day_index: int = 0,
+        excluded_families: Set[str] | None = None,
+        weekly_used_exercises: Set[str] | None = None,
+    ) -> List[Dict[str, Any]]:
         """
         Generate specific exercises for an activity type from dataset with complete information.
         """
@@ -882,18 +711,31 @@ class ExpertsNoteService:
         flags = clinical_context.get("flags", {})
         target_count = int(activity.get("target_count", 6) or 6)
         equipment_preferences = self._extract_available_equipment(ai_prescription)
+        profile = profile or self._create_profile_from_ai(ai_prescription)
+        weekly_used_exercises = set(weekly_used_exercises or set())
 
         if activity_type == "resistance":
             target_count = 4 if "cardio" in str(activity.get("paired_with", "")).lower() else target_count
             resistance_df = df[df["Primary Category"].str.lower().str.contains("strength|weight|resistance", na=False)].copy()
             resistance_df = resistance_df[~resistance_df["Tags"].str.contains("warm up|cooldown", na=False)]
+            resistance_df = self._apply_strict_equipment_filter(resistance_df, profile)
             resistance_df = self._filter_rows_by_required_equipment(resistance_df, ai_prescription)
             safe_df = resistance_df[resistance_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
             if safe_df.empty:
                 safe_df = resistance_df
 
             focus = str(activity.get("focus") or "full").lower()
-            selected_rows = self._select_resistance_rows(safe_df, target_count, focus, equipment_preferences)
+            safe_df = self._filter_rows_by_intensity_band(safe_df, ai_prescription)
+            safe_df = self._exclude_used_rows(safe_df, weekly_used_exercises, excluded_families)
+            selected_rows = self._select_resistance_rows(
+                safe_df,
+                target_count,
+                focus,
+                equipment_preferences,
+                day_index=day_index,
+                excluded_families=excluded_families,
+            )
+            selected_rows = self._sample_rows(selected_rows, target_count)
             for _, row in selected_rows.iterrows():
                 exercises.append(self._format_exercise_from_dataset(row, "resistance"))
 
@@ -904,12 +746,16 @@ class ExpertsNoteService:
             target_count = 5
             cardio_df = df[df["Primary Category"].str.lower().str.contains("cardio", na=False)].copy()
             cardio_df = cardio_df[~cardio_df["Tags"].str.contains("warm up|cooldown", na=False)]
+            cardio_df = self._apply_strict_equipment_filter(cardio_df, profile)
             cardio_df = self._filter_rows_by_required_equipment(cardio_df, ai_prescription, cardio_mode=True)
             safe_df = cardio_df[cardio_df.apply(lambda row: self._exercise_is_safe_from_row(row, flags), axis=1)]
             if safe_df.empty:
                 safe_df = cardio_df
 
-            selected_rows = self._pick_distinct_rows(self._rank_rows_by_equipment(safe_df, equipment_preferences), target_count)
+            safe_df = self._filter_rows_by_intensity_band(safe_df, ai_prescription)
+            safe_df = self._exclude_used_rows(safe_df, weekly_used_exercises, excluded_families)
+            selected_rows = self._pick_distinct_rows(self._rank_rows_by_equipment(safe_df, equipment_preferences), target_count, excluded_families=excluded_families)
+            selected_rows = self._sample_rows(selected_rows, target_count)
             for _, row in selected_rows.iterrows():
                 exercises.append(self._format_exercise_from_dataset(row, "cardio"))
 
@@ -959,7 +805,14 @@ class ExpertsNoteService:
         
         return True
 
-    def _generate_warmup_exercises(self, df: pd.DataFrame, activities_text: str, clinical_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _generate_warmup_exercises(
+        self,
+        df: pd.DataFrame,
+        activities_text: str,
+        clinical_context: Dict[str, Any],
+        day_index: int = 0,
+        main_workout: List[Dict[str, Any]] | None = None,
+    ) -> List[Dict[str, Any]]:
         """
         Generate 3 fixed warmup exercises: 1 cardio, 1 upper body mobility, 1 lower body mobility.
         All exercises must be tagged as "Warm up" in the dataset.
@@ -976,6 +829,7 @@ class ExpertsNoteService:
         if safe_warmup_df.empty:
             safe_warmup_df = warmup_df  # Fallback if no safe exercises
         
+        focus_regions = self._infer_main_body_regions(main_workout or [], activities_text)
         cardio_warmup = safe_warmup_df[safe_warmup_df["Primary Category"].str.lower().str.contains("cardio", na=False)]
         upper_mobility = safe_warmup_df[
             safe_warmup_df["Primary Category"].str.lower().str.contains("mobility|stretch|flexibility", na=False) &
@@ -985,18 +839,34 @@ class ExpertsNoteService:
             safe_warmup_df["Primary Category"].str.lower().str.contains("mobility|stretch|flexibility", na=False) &
             safe_warmup_df["Body Region"].str.lower().str.contains("lower|leg|hip|glute|calf", na=False)
         ]
+        cardio_warmup = self._rotate_rows(cardio_warmup, day_index)
+        upper_mobility = self._rotate_rows(upper_mobility, day_index)
+        lower_mobility = self._rotate_rows(lower_mobility, day_index)
 
         seen_names: Set[str] = set()
         warmup_exercises.extend(self._build_support_exercises(cardio_warmup, "warmup", count=1, sets="1", reps="1-2 minutes", min_seconds=120, seen_names=seen_names))
-        warmup_exercises.extend(self._build_support_exercises(upper_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
-        warmup_exercises.extend(self._build_support_exercises(lower_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
+        if "upper" in focus_regions:
+            warmup_exercises.extend(self._build_support_exercises(upper_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
+        if "lower" in focus_regions:
+            warmup_exercises.extend(self._build_support_exercises(lower_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
+        if not any("upper" in self._body_region_bucket(ex.get("body_region")) for ex in warmup_exercises):
+            warmup_exercises.extend(self._build_support_exercises(upper_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
+        if not any("lower" in self._body_region_bucket(ex.get("body_region")) for ex in warmup_exercises):
+            warmup_exercises.extend(self._build_support_exercises(lower_mobility, "warmup", count=1, sets="1", seen_names=seen_names))
         if len(warmup_exercises) < 3:
             remaining_needed = 3 - len(warmup_exercises)
-            warmup_exercises.extend(self._build_support_exercises(safe_warmup_df, "warmup", count=remaining_needed, sets="1", seen_names=seen_names))
+            warmup_exercises.extend(self._build_support_exercises(self._rotate_rows(safe_warmup_df, day_index), "warmup", count=remaining_needed, sets="1", seen_names=seen_names))
 
-        return warmup_exercises
+        return self._dedupe_exercise_variations(warmup_exercises)[:3]
 
-    def _generate_cooldown_exercises(self, df: pd.DataFrame, activities_text: str, clinical_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _generate_cooldown_exercises(
+        self,
+        df: pd.DataFrame,
+        activities_text: str,
+        clinical_context: Dict[str, Any],
+        day_index: int = 0,
+        main_workout: List[Dict[str, Any]] | None = None,
+    ) -> List[Dict[str, Any]]:
         """
         Generate 2 fixed cooldown exercises: 1 upper body stretch and 1 lower body stretch.
         All exercises must be tagged as "Cooldown" in the dataset.
@@ -1015,21 +885,27 @@ class ExpertsNoteService:
         
         upper_stretch = safe_cooldown_df[
             safe_cooldown_df["Primary Category"].str.lower().str.contains("stretch|flexibility|mobility", na=False) &
-            safe_cooldown_df["Body Region"].str.lower().str.contains("upper|shoulder|arm|chest|back|neck", na=False)
+            safe_cooldown_df["Body Region"].str.lower().str.contains("upper|shoulder|arm|chest|back|neck|core|full", na=False)
         ]
         lower_stretch = safe_cooldown_df[
             safe_cooldown_df["Primary Category"].str.lower().str.contains("stretch|flexibility|mobility", na=False) &
             safe_cooldown_df["Body Region"].str.lower().str.contains("lower|leg|hip|glute|calf|full", na=False)
         ]
+        lower_specific = safe_cooldown_df[
+            safe_cooldown_df["Primary Category"].str.lower().str.contains("stretch|flexibility|mobility", na=False) &
+            safe_cooldown_df["Body Region"].str.lower().str.contains("lower|leg|hip|glute|calf", na=False)
+        ]
+        upper_stretch = self._rotate_rows(upper_stretch, day_index)
+        lower_stretch = self._rotate_rows(lower_specific if not lower_specific.empty else lower_stretch, day_index)
 
         seen_names: Set[str] = set()
         cooldown_exercises.extend(self._build_support_exercises(upper_stretch, "cooldown", count=1, sets="1", seen_names=seen_names))
         cooldown_exercises.extend(self._build_support_exercises(lower_stretch, "cooldown", count=1, sets="1", seen_names=seen_names))
         if len(cooldown_exercises) < 2:
             remaining_needed = 2 - len(cooldown_exercises)
-            cooldown_exercises.extend(self._build_support_exercises(safe_cooldown_df, "cooldown", count=remaining_needed, sets="1", seen_names=seen_names))
+            cooldown_exercises.extend(self._build_support_exercises(self._rotate_rows(safe_cooldown_df, day_index), "cooldown", count=remaining_needed, sets="1", seen_names=seen_names))
 
-        return cooldown_exercises
+        return self._dedupe_exercise_variations(cooldown_exercises)[:2]
 
     def _generate_day_title(self, day_plan: Dict[str, Any], activities_text: str) -> str:
         """
@@ -1173,9 +1049,13 @@ class ExpertsNoteService:
         ai_prescription: Dict[str, Any],
         clinical_context: Dict[str, Any],
         target_count: int = 6,
+        day_index: int = 0,
+        excluded_families: Set[str] | None = None,
+        weekly_used_exercises: Set[str] | None = None,
+        profile: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         """Ensure every active day has a stable, non-empty main workout size."""
-        existing = list(day_plan.get("main_workout", []) or [])
+        existing = self._dedupe_exercise_variations(list(day_plan.get("main_workout", []) or []))
         if len(existing) >= target_count:
             return existing[:target_count]
 
@@ -1184,11 +1064,13 @@ class ExpertsNoteService:
         existing_names = {str(ex.get("name", "")).strip().lower() for ex in existing if str(ex.get("name", "")).strip()}
         normalized_text = str(activities_text or "").lower()
         session_blocks = [ex for ex in existing if ex.get("_is_session_payload")]
-        existing_non_session_names = {
-            str(ex.get("name", "")).strip().lower()
+        existing_non_session_families = {
+            self._exercise_family(ex.get("name", ""))
             for ex in existing
             if str(ex.get("name", "")).strip() and not ex.get("_is_session_payload")
         }
+        excluded_families = set(excluded_families or set())
+        weekly_used_exercises = set(weekly_used_exercises or set())
 
         if any(term in normalized_text for term in ["strength", "resistance", "weights", "dumbbell", "band"]):
             fallback_section = "resistance"
@@ -1199,17 +1081,39 @@ class ExpertsNoteService:
         else:
             fallback_section = "cardio"
             fallback_rows = self._fallback_main_rows(df, flags, equipment_preferences, preferred_mode="cardio", focus_text=normalized_text)
+        if profile is not None:
+            fallback_rows = self._apply_strict_equipment_filter(fallback_rows, profile)
+        fallback_rows = self._exclude_used_rows(fallback_rows, weekly_used_exercises, excluded_families)
+        fallback_rows = self._sample_rows(fallback_rows, len(fallback_rows))
 
         for _, row in fallback_rows.iterrows():
-            row_name = str(row.get("Exercise Name", "")).strip().lower()
-            if not row_name or row_name in existing_non_session_names:
+            row_name = str(row.get("Exercise Name", "")).strip()
+            row_family = self._exercise_family(row_name)
+            if (
+                not row_name
+                or row_family in existing_non_session_families
+                or row_family in excluded_families
+            ):
                 continue
             existing.append(self._format_exercise_from_dataset(row, fallback_section))
-            existing_non_session_names.add(row_name)
+            existing_non_session_families.add(row_family)
             if len(existing) >= target_count:
                 break
 
-        return session_blocks + [ex for ex in existing if not ex.get("_is_session_payload")][:max(0, target_count - len(session_blocks))]
+        if len(existing) < target_count:
+            fallback_rows = self._sample_rows(fallback_rows, len(fallback_rows))
+            for _, row in fallback_rows.iterrows():
+                row_name = str(row.get("Exercise Name", "")).strip()
+                row_family = self._exercise_family(row_name)
+                if not row_name or row_family in existing_non_session_families:
+                    continue
+                existing.append(self._format_exercise_from_dataset(row, fallback_section))
+                existing_non_session_families.add(row_family)
+                if len(existing) >= target_count:
+                    break
+
+        non_session = [ex for ex in self._dedupe_exercise_variations(existing) if not ex.get("_is_session_payload")]
+        return session_blocks + non_session[:max(0, target_count - len(session_blocks))]
 
     def _section_duration_label(self, exercises: List[Dict[str, Any]]) -> str:
         total_sec = sum(int(ex.get("est_time_sec", 0) or 0) for ex in exercises)
@@ -1269,6 +1173,242 @@ class ExpertsNoteService:
                 })
 
         return updated
+
+    def _display_equipment_list(self, equipment: List[str]) -> List[str]:
+        labels = {
+            "bodyweight": "Bodyweight Only",
+            "dumbbell": "Dumbbells",
+            "resistance band": "Resistance Band",
+            "treadmill": "Treadmill",
+            "elliptical": "Elliptical",
+            "cycling": "Bike",
+            "brisk walking": "Walking",
+        }
+        return [labels.get(item, str(item).title()) for item in equipment]
+
+    def _get_user_seed(self, profile: Dict[str, Any]) -> int:
+        primary_goal = str(profile.get("primary_goal") or profile.get("goal") or "")
+        days_per_week = str(profile.get("days_per_week") or profile.get("days") or "")
+        intensity = str(profile.get("intensity") or profile.get("fitness_level") or "")
+        focus = str(profile.get("focus") or profile.get("target_body_parts") or "")
+        return hash(primary_goal + days_per_week + intensity + focus) % 10000
+
+    def _sample_rows(self, rows: pd.DataFrame, target_count: int) -> pd.DataFrame:
+        if rows.empty or target_count <= 0:
+            return rows.head(0)
+        return rows.sample(n=min(target_count, len(rows)), replace=False, random_state=None)
+
+    def _exercise_key(self, name: Any) -> str:
+        return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+    def _exclude_used_rows(
+        self,
+        rows: pd.DataFrame,
+        weekly_used_exercises: Set[str] | None = None,
+        excluded_families: Set[str] | None = None,
+    ) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        weekly_used_exercises = set(weekly_used_exercises or set())
+        excluded_families = set(excluded_families or set())
+
+        def is_unused(row: pd.Series) -> bool:
+            name = row.get("Exercise Name", "")
+            return (
+                self._exercise_key(name) not in weekly_used_exercises
+                and self._exercise_family(name) not in excluded_families
+            )
+
+        filtered = rows[rows.apply(is_unused, axis=1)]
+        return filtered if not filtered.empty else rows
+
+    def _profile_bodyweight_only(self, profile: Dict[str, Any]) -> bool:
+        equipment = profile.get("available_equipment") or profile.get("equipment") or []
+        if isinstance(equipment, str):
+            equipment = [equipment]
+        normalized = {str(item or "").strip().lower() for item in equipment}
+        return bool(normalized) and normalized.issubset({"bodyweight only", "bodyweight", "no equipment", "none"})
+
+    def _apply_strict_equipment_filter(self, rows: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        if self._profile_bodyweight_only(profile):
+            bodyweight_rows = rows[rows["Equipments"].astype(str).str.contains("bodyweight", case=False, na=False)]
+            return bodyweight_rows if not bodyweight_rows.empty else rows.head(0)
+        return rows
+
+    def _rotate_rows(self, rows: pd.DataFrame, offset: int) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        offset = int(offset or 0) % len(rows)
+        if offset == 0:
+            return rows
+        return pd.concat([rows.iloc[offset:], rows.iloc[:offset]])
+
+    def _exercise_family(self, name: Any) -> str:
+        text = str(name or "").lower()
+        text = re.sub(r"[^a-z0-9\s-]", " ", text)
+        text = re.sub(
+            r"\b(incline|decline|knee|modified|assisted|wall|seated|standing|lying|"
+            r"level|level-?\d+|beginner|advanced|alternate|alternating|single|double)\b",
+            " ",
+            text,
+        )
+        text = re.sub(r"\s+", " ", text).strip()
+        family_patterns = {
+            "push up": r"\b(push[\s-]*ups?|pushup|press[\s-]*ups?)\b",
+            "mountain climber": r"\bmountain\s+climber",
+            "lunge": r"\blunges?\b",
+            "squat": r"\bsquats?\b",
+            "plank": r"\bplank",
+            "bridge": r"\bbridge",
+            "row": r"\brow",
+            "press": r"\bpress",
+            "curl": r"\bcurl",
+            "raise": r"\braise",
+            "twist": r"\btwist",
+            "crunch": r"\bcrunch",
+            "leg raise": r"\bleg\s+raise",
+            "windshield wiper": r"\bwindshield\s+wiper",
+        }
+        for family, pattern in family_patterns.items():
+            if re.search(pattern, text):
+                return family
+        return text
+
+    def _dedupe_exercise_variations(self, exercises: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen_families: Set[str] = set()
+        for exercise in exercises:
+            if exercise.get("_is_session_payload"):
+                deduped.append(exercise)
+                continue
+            family = self._exercise_family(exercise.get("name", ""))
+            if not family or family in seen_families:
+                continue
+            seen_families.add(family)
+            deduped.append(exercise)
+        return deduped
+
+    def _body_region_bucket(self, value: Any) -> str:
+        text = str(value or "").lower()
+        if any(term in text for term in ["upper", "shoulder", "arm", "chest", "back", "neck"]):
+            return "upper"
+        if any(term in text for term in ["lower", "leg", "hip", "glute", "calf", "ankle"]):
+            return "lower"
+        if "core" in text:
+            return "core"
+        return "full" if "full" in text else ""
+
+    def _infer_main_body_regions(self, main_workout: List[Dict[str, Any]], activities_text: Any) -> Set[str]:
+        regions: Set[str] = set()
+        for exercise in main_workout:
+            bucket = self._body_region_bucket(exercise.get("body_region", ""))
+            if bucket:
+                regions.add(bucket)
+        text = str(activities_text or "").lower()
+        if "upper" in text:
+            regions.add("upper")
+        if "lower" in text:
+            regions.add("lower")
+        if "core" in text:
+            regions.add("core")
+        if not regions or "full" in regions:
+            regions.update({"upper", "lower"})
+        return regions
+
+    def _sanitize_sets(self, sets: Any, section: str) -> str:
+        text = str(sets or "").strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return "1" if section in {"warmup", "cooldown", "cardio", "session"} else "2"
+        numbers = [int(num) for num in re.findall(r"\d+", text)]
+        if numbers and max(numbers) > 12:
+            return "1" if section in {"warmup", "cooldown", "cardio", "session"} else "2"
+        return text
+
+    def _sanitize_reps(self, reps: Any, section: str, category: Any = "") -> str:
+        if isinstance(reps, int) and reps > 100:
+            return self._default_reps(section, category)
+        text = str(reps or "").strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return self._default_reps(section, category)
+        numbers = [int(num) for num in re.findall(r"\d+", text)]
+        if re.fullmatch(r"\d{4,}", text) or any(num > 300 for num in numbers):
+            return self._default_reps(section, category)
+        return text
+
+    def _default_reps(self, section: str, category: Any = "") -> str:
+        category_text = str(category or "").lower()
+        if section == "warmup":
+            return "8-12 reps"
+        if section == "cooldown":
+            return "Hold 20-30 sec"
+        if section in {"cardio", "session"} or "cardio" in category_text:
+            return "30-45 sec"
+        return "10-12 reps"
+
+    def _sets_count(self, sets: Any) -> int:
+        numbers = [int(num) for num in re.findall(r"\d+", str(sets or ""))]
+        if not numbers:
+            return 1
+        return max(1, min(numbers[0], 12))
+
+    def _format_rpe_label(self, rpe: Any) -> str:
+        text = str(rpe or "").strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return ""
+        return text if text.upper().startswith("RPE") else f"RPE {text}"
+
+    def _rpe_midpoint(self, value: Any) -> float | None:
+        numbers = [float(num) for num in re.findall(r"\d+(?:\.\d+)?", str(value or ""))]
+        if not numbers:
+            return None
+        return sum(numbers[:2]) / min(len(numbers), 2)
+
+    def _target_rpe_band(self, ai_prescription: Dict[str, Any]) -> tuple[float, float]:
+        intensity = str(ai_prescription.get("intensity") or "").lower()
+        if any(term in intensity for term in ["high", "vigorous", "hard"]):
+            return (6.0, 8.0)
+        if any(term in intensity for term in ["low", "light", "easy"]):
+            return (2.0, 5.0)
+        return (4.0, 7.0)
+
+    def _filter_rows_by_intensity_band(self, rows: pd.DataFrame, ai_prescription: Dict[str, Any]) -> pd.DataFrame:
+        if rows.empty:
+            return rows
+        low, high = self._target_rpe_band(ai_prescription)
+
+        def in_band(row: pd.Series) -> bool:
+            midpoint = self._rpe_midpoint(row.get("RPE", ""))
+            return midpoint is None or low <= midpoint <= high
+
+        filtered = rows[rows.apply(in_band, axis=1)]
+        return filtered if not filtered.empty else rows
+
+    def _normalize_intensity(self, day_exercises: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        main_with_rpe = [
+            (exercise, self._rpe_midpoint(exercise.get("intensity_rpe") or exercise.get("rpe")))
+            for exercise in day_exercises
+            if not exercise.get("_is_session_payload")
+        ]
+        numeric_rpes = sorted(rpe for _, rpe in main_with_rpe if rpe is not None)
+        if len(numeric_rpes) < 2:
+            return day_exercises
+
+        midpoint = numeric_rpes[len(numeric_rpes) // 2]
+        normalized: List[Dict[str, Any]] = []
+        removed = 0
+        for exercise in day_exercises:
+            if exercise.get("_is_session_payload"):
+                normalized.append(exercise)
+                continue
+            rpe = self._rpe_midpoint(exercise.get("intensity_rpe") or exercise.get("rpe"))
+            if rpe is None or abs(rpe - midpoint) <= 2:
+                normalized.append(exercise)
+            else:
+                removed += 1
+
+        return normalized if normalized and removed < len(day_exercises) else day_exercises
 
     def _extract_available_equipment(self, ai_prescription: Dict[str, Any]) -> List[str]:
         equipment_items: List[str] = []
@@ -1374,7 +1514,8 @@ class ExpertsNoteService:
         def matches(row: pd.Series) -> bool:
             row_equipment = self._normalize_equipment_label(row.get("Equipments", ""))
             if cardio_mode:
-                return any(item in row_equipment for item in strict_equipment if item in {"treadmill", "elliptical", "cycling"})
+                cardio_equipment = [item for item in strict_equipment if item in {"treadmill", "elliptical", "cycling"}]
+                return not cardio_equipment or any(item in row_equipment for item in cardio_equipment)
             return any(item in row_equipment for item in strict_equipment)
 
         filtered = rows[rows.apply(matches, axis=1)]
@@ -1485,7 +1626,7 @@ class ExpertsNoteService:
         preferred = [str(item).lower() for item in equipment_preferences if item]
 
         def score(row: pd.Series) -> int:
-            row_equipment = str(row.get("Equipments", "") or "").lower()
+            row_equipment = self._normalize_equipment_label(row.get("Equipments", ""))
             points = 0
             if preferred:
                 if any(pref in row_equipment for pref in preferred if pref != "bodyweight"):
@@ -1499,11 +1640,38 @@ class ExpertsNoteService:
         ranked = ranked.sort_values(by=["_equipment_score"], ascending=False)
         return ranked.drop(columns=["_equipment_score"])
 
-    def _pick_distinct_rows(self, rows: pd.DataFrame, count: int) -> pd.DataFrame:
+    def _pick_distinct_rows(
+        self,
+        rows: pd.DataFrame,
+        count: int,
+        excluded_families: Set[str] | None = None,
+    ) -> pd.DataFrame:
         if rows.empty:
             return rows
-        distinct = rows.drop_duplicates(subset=["Exercise Name"], keep="first")
-        return distinct.head(count)
+        excluded_families = set(excluded_families or set())
+        selected_indexes: List[Any] = []
+        seen_families: Set[str] = set()
+
+        for idx, row in rows.iterrows():
+            family = self._exercise_family(row.get("Exercise Name", ""))
+            if not family or family in seen_families or family in excluded_families:
+                continue
+            selected_indexes.append(idx)
+            seen_families.add(family)
+            if len(selected_indexes) >= count:
+                break
+
+        if len(selected_indexes) < count:
+            for idx, row in rows.iterrows():
+                family = self._exercise_family(row.get("Exercise Name", ""))
+                if not family or family in seen_families:
+                    continue
+                selected_indexes.append(idx)
+                seen_families.add(family)
+                if len(selected_indexes) >= count:
+                    break
+
+        return rows.loc[selected_indexes]
 
     def _fallback_main_rows(
         self,
@@ -1554,11 +1722,13 @@ class ExpertsNoteService:
         target_count: int,
         focus: str,
         equipment_preferences: List[str],
+        day_index: int = 0,
+        excluded_families: Set[str] | None = None,
     ) -> pd.DataFrame:
         if rows.empty:
             return rows
 
-        ranked = self._rank_rows_by_equipment(rows, equipment_preferences)
+        ranked = self._rotate_rows(self._rank_rows_by_equipment(rows, equipment_preferences), day_index * max(1, target_count))
         preferred_rows = ranked[
             ranked["Equipments"].astype(str).str.lower().apply(
                 lambda value: any(pref in value for pref in equipment_preferences if pref != "bodyweight")
@@ -1574,23 +1744,26 @@ class ExpertsNoteService:
 
         selections: List[pd.DataFrame] = []
         if focus == "upper":
-            selections.append(self._pick_distinct_rows(upper_rows, target_count))
+            selections.append(self._pick_distinct_rows(upper_rows, target_count, excluded_families=excluded_families))
         elif focus == "lower":
-            selections.append(self._pick_distinct_rows(lower_rows, target_count))
+            selections.append(self._pick_distinct_rows(lower_rows, target_count, excluded_families=excluded_families))
         elif focus == "core":
-            selections.append(self._pick_distinct_rows(core_rows, target_count))
+            selections.append(self._pick_distinct_rows(core_rows, target_count, excluded_families=excluded_families))
         else:
-            selections.append(self._pick_distinct_rows(upper_rows, 2))
-            selections.append(self._pick_distinct_rows(lower_rows, 2))
-            selections.append(self._pick_distinct_rows(core_rows, 2))
+            selections.append(self._pick_distinct_rows(upper_rows, 2, excluded_families=excluded_families))
+            selections.append(self._pick_distinct_rows(lower_rows, 2, excluded_families=excluded_families))
+            selections.append(self._pick_distinct_rows(core_rows, 2, excluded_families=excluded_families))
 
         selected = pd.concat(selections) if selections else ranked.head(0)
-        selected = selected.drop_duplicates(subset=["Exercise Name"], keep="first")
+        selected = self._pick_distinct_rows(selected, target_count)
 
         if len(selected) < target_count:
             remaining = ranked[~ranked["Exercise Name"].isin(selected["Exercise Name"])]
-            selected = pd.concat([selected, self._pick_distinct_rows(remaining, target_count - len(selected))])
-            selected = selected.drop_duplicates(subset=["Exercise Name"], keep="first")
+            selected = pd.concat([
+                selected,
+                self._pick_distinct_rows(remaining, target_count - len(selected), excluded_families=excluded_families),
+            ])
+            selected = self._pick_distinct_rows(selected, target_count)
 
         return selected.head(target_count)
 
@@ -1608,9 +1781,11 @@ class ExpertsNoteService:
         if rows.empty:
             return exercises
 
-        distinct = rows.drop_duplicates(subset=["Exercise Name"], keep="first")
-        distinct = distinct[~distinct["Exercise Name"].isin(seen_names)]
-        for _, row in distinct.head(count).iterrows():
+        built_count = 0
+        for _, row in rows.iterrows():
+            family = self._exercise_family(row.get("Exercise Name", ""))
+            if not family or family in seen_names:
+                continue
             exercise = self._format_exercise_from_dataset(row, section)
             exercise["sets"] = sets
             exercise["planned_sets_count"] = 1
@@ -1622,8 +1797,11 @@ class ExpertsNoteService:
                 exercise["estimated_calories"] = self._estimate_exercise_calories(float(exercise.get("met_value", 1.5) or 1.5), exercise["est_time_sec"])
                 exercise["est_calories"] = f"Est: {exercise['estimated_calories']} Cal"
                 exercise["planned_total_cal"] = exercise["estimated_calories"]
-            seen_names.add(str(exercise.get("name", "")))
+            seen_names.add(family)
             exercises.append(exercise)
+            built_count += 1
+            if built_count >= count:
+                break
         return exercises
 
     def _split_steps(self, raw_steps: Any) -> List[str]:
@@ -1726,8 +1904,8 @@ class ExpertsNoteService:
         """
         name = str(row.get("Exercise Name", "") or "")
         guid = str(row.get("GuidId", "") or "").strip() or None
-        sets = str(row.get("Sets", "1") or "1")
-        reps = str(row.get("Reps", "10") or "10")
+        sets = self._sanitize_sets(row.get("Sets", "1"), section)
+        reps = self._sanitize_reps(row.get("Reps", "10"), section, row.get("Primary Category", ""))
         benefit = str(row.get("Health benefit", "") or "")
         safety_cue = str(row.get("Safety cue", "") or "")
         steps = self._split_steps(row.get("Steps to perform", ""))
@@ -1766,7 +1944,7 @@ class ExpertsNoteService:
             "fitness_level": str(row.get("Fitness Level", "") or ""),
             "physical_limitations": str(row.get("Physical limitation", "") or ""),
             "rpe": str(row.get("RPE", "") or ""),
-            "intensity_rpe": str(row.get("RPE", "") or ""),
+            "intensity_rpe": self._format_rpe_label(row.get("RPE", "")),
             "rest_intervals": rest_intervals,
             "rest": rest_intervals,
             "rest_time": rest_intervals,
@@ -1775,7 +1953,7 @@ class ExpertsNoteService:
             "estimated_calories": estimated_calories,
             "est_time_sec": est_time_sec,
             "est_time_human": self._humanize_seconds(est_time_sec),
-            "planned_sets_count": max(1, int(float(sets))) if str(sets).replace(".", "", 1).isdigit() else 1,
+            "planned_sets_count": self._sets_count(sets),
             "planned_total_cal": estimated_calories,
             "is_not_suitable_for": str(row.get("is_not_suitable_for (Medical conditions)", "") or ""),
         }

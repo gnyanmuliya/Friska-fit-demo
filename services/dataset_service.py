@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import re
 from typing import Dict
 
 import pandas as pd
@@ -77,6 +78,7 @@ class DatasetService:
                 df[column] = ""
 
         df = df.fillna("")
+        df["reps"] = df["reps"].apply(cls._sanitize_reps)
         df["tags"] = df["tags"].apply(cls._normalize_tags)
         df["goal"] = df["goal"].replace("", "All")
         df["fitness_level"] = df["fitness_level"].replace("", "Beginner")
@@ -152,6 +154,7 @@ class DatasetService:
                 df[column] = ""
 
         df = df.fillna("")
+        df["reps"] = df["reps"].apply(cls._sanitize_reps)
         df["tags"] = df["tags"].apply(cls._normalize_tags)
         return df
 
@@ -200,3 +203,17 @@ class DatasetService:
         for old, new in replacements.items():
             text = text.replace(old, new)
         return text
+
+    @staticmethod
+    def _sanitize_reps(value: object) -> str:
+        if isinstance(value, int) and value > 100:
+            return "10-15"
+        text = str(value or "").strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return "10-12"
+        numbers = [int(part) for part in re.findall(r"\d+", text)]
+        if re.fullmatch(r"\d{4,}", text) or any(number > 300 for number in numbers):
+            return "10-15"
+        if any(char.isdigit() for char in text):
+            return text
+        return "10-12"

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import random
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -133,6 +134,47 @@ def _seed_for_profile(profile: Dict[str, Any]) -> int:
     return int(hashlib.md5(payload).hexdigest()[:8], 16)
 
 
+def _sanitize_reps_value(reps: Any) -> str:
+    if isinstance(reps, int) and reps > 100:
+        return "10-15"
+    text = str(reps or "").strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return "10-12"
+    numbers = [int(part) for part in re.findall(r"\d+", text)]
+    if re.fullmatch(r"\d{4,}", text) or any(value > 300 for value in numbers):
+        return "10-15"
+    if any(char.isdigit() for char in text):
+        return text
+    return "10-12"
+
+
+def _is_bodyweight_only(profile: Dict[str, Any]) -> bool:
+    equipment = profile.get("available_equipment") or profile.get("equipment") or []
+    if isinstance(equipment, str):
+        equipment = [equipment]
+    normalized = {str(item or "").strip().lower() for item in equipment}
+    return bool(normalized) and normalized.issubset({"bodyweight only", "bodyweight", "no equipment", "none"})
+
+
+def _postprocess_generated_plan(plan: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    bodyweight_only = _is_bodyweight_only(_normalize_profile(profile))
+    for day_data in (plan or {}).values():
+        if not isinstance(day_data, dict):
+            continue
+        for section in ("warmup", "main_workout", "cooldown"):
+            cleaned = []
+            for exercise in day_data.get(section, []) or []:
+                if not isinstance(exercise, dict):
+                    continue
+                exercise["reps"] = _sanitize_reps_value(exercise.get("reps"))
+                equipment = str(exercise.get("equipment") or exercise.get("Equipments") or "")
+                if bodyweight_only and equipment and "bodyweight" not in equipment.lower():
+                    continue
+                cleaned.append(exercise)
+            day_data[section] = cleaned
+    return plan
+
+
 def _execute_legacy_plan(profile: Dict[str, Any]) -> ToolResult:
     planner = legacy_fitness.FitnessPlanGeneratorTool()
     normalized = _normalize_profile(profile)
@@ -159,15 +201,15 @@ def generate_plan_local_from_dataset(profile: Dict[str, Any], dataset_path: str,
     finally:
         legacy_fitness.FitnessDataset.POSSIBLE_PATHS = old_paths
     if enrich_video:
-        return VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
-    return plan
+        return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
+    return _postprocess_generated_plan(plan, profile)
 
 
 def generate_plan_local(profile: Dict[str, Any], *, enrich_video: bool = True) -> Dict[str, Any]:
     plan = run_old_engine(profile)
     if enrich_video:
-        return VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
-    return plan
+        return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
+    return _postprocess_generated_plan(plan, profile)
 
 
 def run_new_engine(profile: Dict[str, Any]) -> Dict[str, Any]:

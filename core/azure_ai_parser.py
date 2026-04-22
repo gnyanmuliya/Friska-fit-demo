@@ -4,7 +4,10 @@ import logging
 import os
 from typing import Dict, Any, List
 from openai import AzureOpenAI
-from json_repair import repair_json
+try:
+    from json_repair import repair_json
+except ModuleNotFoundError:  # pragma: no cover
+    repair_json = None
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,14 @@ class AzureAIPrescriptionParser:
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as original_error:
+            if repair_json is None:
+                if finish_reason == "length":
+                    raise AzureAIParseError(
+                        "Azure AI response was too long and got cut off. Please shorten the note or try again."
+                    ) from original_error
+                raise AzureAIParseError(
+                    "Azure AI returned invalid JSON and json_repair is not installed."
+                ) from original_error
             try:
                 repaired_content = repair_json(content)
                 parsed = json.loads(repaired_content)
