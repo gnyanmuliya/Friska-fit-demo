@@ -489,20 +489,56 @@ class ExpertsNoteService:
     ) -> Dict[str, str]:
         text = str(notes_text or "")
         schedule = {day.lower(): [] for day in DAY_ORDER}
+        if current_schedule:
+            has_explicit_yoga = any("yoga" in str(value).lower() for value in current_schedule.values())
+        else:
+            has_explicit_yoga = False
 
         for day, activity in self._normalize_weekly_schedule(current_schedule or {}).items():
             if activity and not self._is_rest_day_text(activity):
                 schedule.setdefault(day, []).extend(self._split_activity_label(activity))
 
-        yoga_days = self._extract_named_class_days(text, ["yoga", "hatha"])
-        for day in yoga_days:
+        fixed_yoga_days: List[str] = []
+        optional_yoga_days: List[str] = []
+        for sentence in re.split(r"[.;\n]+", text.lower()):
+            sentence = sentence.strip()
+            if not sentence or not any(keyword in sentence for keyword in ["yoga", "hatha", "meditation"]):
+                continue
+            matching_days = [day.lower() for day in DAY_ORDER if day.lower() in sentence]
+            if "or" in sentence:
+                for day in matching_days:
+                    if day not in optional_yoga_days:
+                        optional_yoga_days.append(day)
+                continue
+            for day in matching_days:
+                if day not in fixed_yoga_days:
+                    fixed_yoga_days.append(day)
+
+        if has_explicit_yoga:
+            fixed_yoga_days = []
+            optional_yoga_days = []
+
+        for day in fixed_yoga_days:
             schedule[day].append("Yoga")
+
+        max_yoga_days = 3
+        remaining_slots = max_yoga_days - len(fixed_yoga_days)
+        for day in optional_yoga_days:
+            if remaining_slots <= 0:
+                break
+            if "Yoga" not in schedule[day]:
+                schedule[day].append("Yoga")
+                remaining_slots -= 1
+
+        for day in schedule:
+            if schedule[day].count("Yoga") > 1:
+                schedule[day] = list(dict.fromkeys(schedule[day]))
 
         cardio_count = self._extract_modality_frequency(text, ["cardio", "cardiovascular", "dance", "brisk walking", "hiking", "bike", "elliptical"], default=0)
         mobility_count = self._extract_modality_frequency(text, ["stretching", "physioball", "abs"], default=0)
         resistance_count = self._extract_modality_frequency(text, ["resistance", "weights", "bands", "body weight", "strength"], default=0)
 
-        if not any([cardio_count, mobility_count, resistance_count, yoga_days]):
+        if not any([cardio_count, mobility_count, resistance_count, fixed_yoga_days, optional_yoga_days]):
             fallback_labels = [
                 "Strength",
                 "Hybrid",
@@ -1130,8 +1166,9 @@ class ExpertsNoteService:
             return []
         has_yoga = "yoga" in text_lower
         has_mobility = any(term in text_lower for term in ["mobility", "stretch", "physioball"])
-        has_cardio = any(term in text_lower for term in ["cardio", "walk", "walking", "cycling", "elliptical", "rowing", "hybrid"])
-        has_hiit = any(term in text_lower for term in ["hiit", "interval", "tabata"])
+        has_hiit = any(term in text_lower for term in ["hiit", "tabata"])
+        has_interval_only = "interval" in text_lower and not has_hiit
+        has_cardio = any(term in text_lower for term in ["cardio", "walk", "walking", "cycling", "elliptical"])
         has_circuit_resistance = "circuit resistance" in text_lower
         has_strength = any(term in text_lower for term in ["weight", "weights", "resistance", "strength", "dumbbell", "band", "hybrid"]) or has_circuit_resistance
 
@@ -1141,6 +1178,10 @@ class ExpertsNoteService:
             payload = {"type": activity_type}
             payload.update(kwargs)
             activities.append(payload)
+
+        if has_interval_only:
+            activities = [{"type": "full_body_cardio", "target_count": 5}]
+            return self._apply_activity_priority(activities)[:2]
 
         if has_hiit:
             _add("full_body_cardio", target_count=5)
@@ -1164,10 +1205,13 @@ class ExpertsNoteService:
         if has_circuit_resistance:
             activities = [item for item in activities if str(item.get("type", "")).lower() != "full_body_cardio"]
 
+        if has_hiit:
+            activities = [item for item in activities if str(item.get("type", "")).lower() != "cardio"]
+
         if not activities:
             activities = [{"type": "cardio", "target_count": 5}]
 
-        return self._apply_activity_priority(activities)
+        return self._apply_activity_priority(activities)[:2]
 
     def _generate_activity_exercises(
         self,
@@ -1441,6 +1485,26 @@ class ExpertsNoteService:
             return "Full Body Hybrid"
         return " + ".join(names)
 
+    def _generate_title_from_activities(self, activities: List[Dict[str, Any]]) -> str:
+        mapping = {
+            "cardio": "Cardio",
+            "resistance": "Strength",
+            "full_body_cardio": "Full Body Hybrid",
+            "yoga": "Yoga",
+            "mobility": "Mobility",
+        }
+        types = list(dict.fromkeys(
+            str(activity.get("type", "")).strip().lower()
+            for activity in activities or []
+            if str(activity.get("type", "")).strip()
+        ))
+        if "full_body_cardio" in types and "cardio" in types:
+            types.remove("cardio")
+        types = types[:2]
+        if not types:
+            return "Workout Session"
+        return " + ".join(mapping.get(item, item.replace("_", " ").title()) for item in types)
+
     def _generate_title_from_plan(self, main_workout: List[Dict[str, Any]]) -> str:
         types: Set[str] = set()
         for exercise in main_workout or []:
@@ -1635,7 +1699,7 @@ class ExpertsNoteService:
         """Convert an internal day plan into the frontend response structure."""
         if not is_rest_day:
             day_plan["main_workout"] = self._validate_day_plan(day_plan.get("main_workout", []), activities)
-        generated_title = self._generate_title_from_plan(day_plan.get("main_workout", [])) if not is_rest_day else "Rest Day"
+        generated_title = self._generate_title_from_activities(activities) if not is_rest_day else "Rest Day"
         day_focus = {
             "main_workout_category": generated_title,
             "workout_title": generated_title,
