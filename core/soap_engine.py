@@ -228,7 +228,7 @@ class SoapEngine:
 
         for restriction in restrictions:
             if restriction == "knee pain":
-                if any(term in row_text for term in ["jump", "hop", "plyo", "burpee", "box jump", "skipping", "lunge", "squat"]):
+                if any(term in row_text for term in ["jump", "hop", "plyo", "burpee", "box jump", "lunge", "squat"]):
                     return True
             if restriction == "low back pain":
                 if any(term in row_text for term in ["deadlift", "good morning", "bend", "back extension", "superman", "hip hinge"]):

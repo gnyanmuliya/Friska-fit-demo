@@ -339,7 +339,7 @@ class ExpertsNoteService:
         
         # Knee safety
         if flags.get("knee_sensitive"):
-            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "skipping", "lunge", "squat", "box step"]
+            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "lunge", "squat", "box step"]
             if any(term in ex_text for term in unsafe_knee):
                 return False
         

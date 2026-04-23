@@ -1228,7 +1228,14 @@ class ExpertsNoteService:
                 exercises.append(self._format_exercise_from_dataset(row, "resistance"))
 
         elif activity_type == "cardio":
-            exercises.append(self._build_session_payload({"session_type": "cardio"}, ai_prescription, profile=profile, used_cardio_modes=used_cardio_modes))
+            return [
+                self._build_session_payload(
+                    {"session_type": "cardio"},
+                    ai_prescription,
+                    profile=profile,
+                    used_cardio_modes=used_cardio_modes,
+                )
+            ]
 
         elif activity_type == "full_body_cardio":
             target_count = max(4, min(target_count, 5))
@@ -1255,7 +1262,14 @@ class ExpertsNoteService:
                 exercises.append(self._format_exercise_from_dataset(row, "cardio"))
 
         elif activity_type == "yoga":
-            exercises.append(self._build_session_payload({"session_type": "yoga"}, ai_prescription, profile=profile, used_cardio_modes=used_cardio_modes))
+            return [
+                self._build_session_payload(
+                    {"session_type": "yoga"},
+                    ai_prescription,
+                    profile=profile,
+                    used_cardio_modes=used_cardio_modes,
+                )
+            ]
 
         elif activity_type == "mobility":
             mobility_df = df[
@@ -1287,7 +1301,7 @@ class ExpertsNoteService:
         
         # Knee safety
         if flags.get("knee_sensitive"):
-            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "skipping", "lunge", "squat", "box step"]
+            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "lunge", "squat", "box step"]
             if any(term in ex_text for term in unsafe_knee):
                 return False
         
@@ -1442,27 +1456,16 @@ class ExpertsNoteService:
         if not types:
             return "Workout Session"
 
-        ordered = []
-        for item in ["resistance", "cardio", "full_body_cardio", "yoga", "mobility"]:
-            if item in types:
-                ordered.append(item)
-        ordered.extend(sorted(item for item in types if item not in ordered))
-
-        labels = []
-        for item in ordered:
-            if item == "full_body_cardio":
-                labels.append("Full Body Hybrid")
-            elif item == "cardio":
-                labels.append("Cardio Session")
-            elif item == "yoga":
-                labels.append("Yoga Session")
-            elif item == "resistance":
-                labels.append("Resistance")
-            elif item == "mobility":
-                labels.append("Mobility")
-            else:
-                labels.append(item.replace("_", " ").title())
-        return " + ".join(labels)
+        mapping = {
+            "cardio": "Cardio",
+            "full_body_cardio": "Full Body Hybrid",
+            "resistance": "Strength",
+            "strength": "Strength",
+            "yoga": "Yoga",
+            "mobility": "Mobility",
+        }
+        names = sorted({mapping.get(item, item.replace("_", " ").title()) for item in types if item})
+        return " + ".join(names)
 
     def _validate_day_plan(
         self,
@@ -1485,11 +1488,13 @@ class ExpertsNoteService:
             else:
                 category = str(exercise.get("category", "")).strip().lower()
                 primary_category = str(exercise.get("primary_category", "")).strip().lower()
-                if any(term in category or term in primary_category for term in ["strength", "resistance", "weight"]):
+                if any(term in f"{category} {primary_category}" for term in ["strength", "resistance", "weight"]):
                     actual_type = "resistance"
                 elif "cardio" in category or "cardio" in primary_category:
                     actual_type = "cardio"
-                elif any(term in category or term in primary_category for term in ["mobility", "stretch", "flexibility", "yoga"]):
+                elif "yoga" in category or "yoga" in primary_category:
+                    actual_type = "yoga"
+                elif any(term in f"{category} {primary_category}" for term in ["mobility", "stretch", "flexibility"]):
                     actual_type = "mobility"
 
             if actual_type in expected_types or (actual_type == "cardio" and "full_body_cardio" in expected_types):
@@ -1508,6 +1513,27 @@ class ExpertsNoteService:
                 if exercise.get("_is_session_payload") and str(exercise.get("_session_type") or "").strip().lower() == "yoga"
             ]
             return yoga_sessions[:1] if yoga_sessions else []
+
+        if "cardio" in expected_types and "resistance" not in expected_types:
+            validated = [
+                exercise for exercise in validated
+                if not (
+                    exercise.get("_is_session_payload")
+                    and str(exercise.get("_session_type") or "").strip().lower() == "resistance"
+                )
+            ]
+
+        if expected_types == {"cardio", "yoga"}:
+            filtered_sessions: List[Dict[str, Any]] = []
+            seen_session_types: Set[str] = set()
+            for exercise in validated:
+                if not exercise.get("_is_session_payload"):
+                    continue
+                session_type = str(exercise.get("_session_type") or "").strip().lower()
+                if session_type in {"cardio", "yoga"} and session_type not in seen_session_types:
+                    filtered_sessions.append(exercise)
+                    seen_session_types.add(session_type)
+            return filtered_sessions
 
         return validated
 
@@ -2261,10 +2287,10 @@ class ExpertsNoteService:
             return row_equipment in normalized_allowed
 
         filtered = rows[rows.apply(is_allowed, axis=1)]
-        return filtered if not filtered.empty else rows
+        return filtered if not filtered.empty else rows.head(0)
 
     def _get_allowed_cardio_types(self, ai_prescription: Dict[str, Any], profile: Dict[str, Any]) -> List[str]:
-        allowed: List[str] = []
+        allowed: List[str] = ["Brisk Walking"]
         available_equipment = {
             str(item or "").strip().lower()
             for item in (profile.get("available_equipment") or [])
@@ -2273,10 +2299,10 @@ class ExpertsNoteService:
 
         if "treadmill" in available_equipment:
             allowed.append("Treadmill")
-        if "bike" in available_equipment or "cycling" in available_equipment:
+        if "cycling" in available_equipment or "bike" in available_equipment:
             allowed.append("Cycling")
-
-        allowed.append("Brisk Walking")
+        if "elliptical" in available_equipment:
+            allowed.append("Elliptical")
         return list(dict.fromkeys(allowed))
 
     def _choose_cardio_mode(self, ai_prescription: Dict[str, Any], profile: Dict[str, Any], used_cardio_modes: Set[str] | None = None) -> str:
@@ -2607,7 +2633,7 @@ class ExpertsNoteService:
         
         # Knee safety
         if flags.get("knee_sensitive"):
-            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "skipping", "lunge", "squat", "box step"]
+            unsafe_knee = ["jump", "hop", "plyo", "burpee", "box jump", "lunge", "squat", "box step"]
             if any(term in ex_text for term in unsafe_knee):
                 return False
         
