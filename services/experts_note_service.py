@@ -1456,6 +1456,10 @@ class ExpertsNoteService:
         if not types:
             return "Workout Session"
 
+        # HIIT/Interval and cardio should collapse into a single title family.
+        if "full_body_cardio" in types and "cardio" in types:
+            types.discard("cardio")
+
         mapping = {
             "cardio": "Cardio",
             "full_body_cardio": "Full Body Hybrid",
@@ -2324,8 +2328,8 @@ class ExpertsNoteService:
         session_defaults = self._extract_session_defaults(ai_prescription)
         profile = profile or self._create_profile_from_ai(ai_prescription)
         default_label_map = {
-            "cardio": "Cardio Session",
-            "full_body_cardio": "Full Body Hybrid",
+            "cardio": "Cardio",
+            "full_body_cardio": "Cardio",
             "yoga": "Yoga Session",
             "mobility": "Mobility Session",
         }
@@ -2338,7 +2342,7 @@ class ExpertsNoteService:
 
         if session_type in {"cardio", "full_body_cardio"}:
             mode_name = self._choose_cardio_mode(ai_prescription, profile, used_cardio_modes=used_cardio_modes)
-            name = f"{label} ({mode_name})"
+            name = f"Cardio ({mode_name})"
             benefit = "Cardiorespiratory conditioning and calorie burn"
             instruction = str(activity.get("instruction") or f"Perform {mode_name} continuously for {duration} minutes as prescribed in the note.").strip()
             equipment = mode_name
