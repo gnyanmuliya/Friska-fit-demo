@@ -1283,7 +1283,8 @@ class ExpertsNoteService:
 
         elif activity_type == "full_body_cardio":
             target_count = max(4, min(target_count, 5))
-            exercises.append(self._build_session_payload({"session_type": "full_body_cardio"}, ai_prescription, profile=profile, used_cardio_modes=used_cardio_modes))
+            # ❌ HIIT/Interval training should be treated as exercise-based, not session-based
+            # DO NOT call _build_session_payload for HIIT
             cardio_df = df[df["Primary Category"].str.lower().str.contains("cardio", na=False)].copy()
             cardio_df = cardio_df[~cardio_df["Primary Category"].str.contains("strength|resistance", case=False, na=False)]
             cardio_df = cardio_df[~cardio_df["Tags"].str.contains("warm up|cooldown", na=False)]
