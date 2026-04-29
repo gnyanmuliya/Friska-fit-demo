@@ -725,6 +725,64 @@ class ExpertsNoteService:
             targets.append("Core")
         return targets or ["Full Body"]
 
+    def _calculate_target_exercise_count(
+        self, 
+        session_duration: str | int, 
+        prescribed_exercise_count: int = 0
+    ) -> int:
+        """
+        Calculate target exercise count dynamically based on session duration and prescribed exercises.
+        
+        Scaling:
+        - 20-30 minutes: 3-4 exercises
+        - 30-45 minutes: 5 exercises
+        - 45-60 minutes: 6 exercises
+        - 60+ minutes: 7 exercises (max)
+        
+        Adds small prescribed exercise weight (max +1-2 more).
+        
+        Args:
+            session_duration: Duration string like "30-45 minutes" or integer minutes
+            prescribed_exercise_count: Number of prescribed exercises to prioritize
+            
+        Returns:
+            Target exercise count (3-7 range)
+        """
+        # Parse duration
+        duration_minutes = 45  # default
+        
+        if isinstance(session_duration, str):
+            # Extract numbers from strings like "30-45 minutes" or "45 min"
+            import re
+            numbers = re.findall(r'\d+', str(session_duration))
+            if numbers:
+                # Use the first number, or average of range
+                if len(numbers) >= 2:
+                    duration_minutes = (int(numbers[0]) + int(numbers[1])) // 2
+                else:
+                    duration_minutes = int(numbers[0])
+        elif isinstance(session_duration, (int, float)):
+            duration_minutes = int(session_duration)
+        
+        # Base count by duration
+        if duration_minutes <= 20:
+            base_count = 3
+        elif duration_minutes <= 30:
+            base_count = 4
+        elif duration_minutes <= 45:
+            base_count = 5
+        elif duration_minutes <= 60:
+            base_count = 6
+        else:
+            base_count = 7
+        
+        # Add small prescribed exercise weight (max +1-2)
+        prescribed_weight = min(1, max(0, prescribed_exercise_count // 2))  # 0-1 extra for prescribed
+        target = base_count + prescribed_weight
+        
+        # Clamp to 3-7 range
+        return max(3, min(7, target))
+
     def generate_plan_from_notes(self, notes_text: str) -> Dict[str, Any]:
         """
         Generate a complete workout plan from expert notes using AI parsing and dataset-driven generation.
@@ -1054,7 +1112,11 @@ class ExpertsNoteService:
                 weekly_strength_days_generated += 1
             
             day_plan = {"warmup": [], "main_workout": [], "cooldown": []}
-            desired_main_count = min(6, max(5, sum(int(activity.get("target_count", 0) or 0) for activity in activities) or 5))
+            prescribed_count = len(ai_prescription.get("prescribed_exercises", []))
+            desired_main_count = self._calculate_target_exercise_count(
+                ai_prescription.get("session_duration", "45-60 minutes"),
+                prescribed_count
+            )
             
             # Generate main workout exercises
             for activity in activities:
@@ -1282,9 +1344,8 @@ class ExpertsNoteService:
             ]
 
         elif activity_type == "full_body_cardio":
-            target_count = max(4, min(target_count, 5))
-            # ❌ HIIT/Interval training should be treated as exercise-based, not session-based
-            # DO NOT call _build_session_payload for HIIT
+            target_count = max(3, target_count - 1)  # Account for session payload that will be added
+            exercises.append(self._build_session_payload({"session_type": "full_body_cardio"}, ai_prescription, profile=profile, used_cardio_modes=used_cardio_modes))
             cardio_df = df[df["Primary Category"].str.lower().str.contains("cardio", na=False)].copy()
             cardio_df = cardio_df[~cardio_df["Primary Category"].str.contains("strength|resistance", case=False, na=False)]
             cardio_df = cardio_df[~cardio_df["Tags"].str.contains("warm up|cooldown", na=False)]
