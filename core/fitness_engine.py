@@ -5,8 +5,9 @@ import copy
 import hashlib
 import random
 import re
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
 
@@ -60,6 +61,7 @@ legacy_fitness._sample_rotation_candidates = _sample_rotation_candidates_compat
 
 
 ToolResult = legacy_fitness.ToolResult
+FitnessDataset = legacy_fitness.FitnessDataset
 ExerciseFilter = legacy_fitness.ExerciseFilter
 _hard_medical_exclusion = legacy_fitness._hard_medical_exclusion
 _classify_exercise_categories = legacy_fitness._classify_exercise_categories
@@ -156,6 +158,141 @@ def _is_bodyweight_only(profile: Dict[str, Any]) -> bool:
     return bool(normalized) and normalized.issubset({"bodyweight only", "bodyweight", "no equipment", "none"})
 
 
+def _parse_avoidance_terms(profile: Dict[str, Any]) -> list[str]:
+    normalized = _normalize_profile(profile)
+    raw_avoidance: Any = normalized.get("specific_avoidance", "")
+    if (not raw_avoidance or str(raw_avoidance).strip().lower() == "none") and normalized.get("avoid_exercises"):
+        raw_avoidance = normalized.get("avoid_exercises")
+
+    if isinstance(raw_avoidance, (list, tuple, set)):
+        raw_text = ",".join(str(item) for item in raw_avoidance if str(item).strip())
+    else:
+        raw_text = str(raw_avoidance or "")
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in re.split(r"[,;\n]", raw_text):
+        clean = re.sub(r"\s+", " ", str(term or "").strip().lower())
+        if not clean or clean == "none" or clean in seen:
+            continue
+        terms.append(clean)
+        seen.add(clean)
+    return terms
+
+
+def _expand_term_variations(term: str) -> set[str]:
+    term = re.sub(r"\s+", " ", str(term or "").strip().lower())
+    if not term:
+        return set()
+
+    variants = {term}
+    tokens = term.split()
+    if not tokens:
+        return variants
+
+    tail = tokens[-1]
+    tail_variants = {tail}
+    if tail.endswith("ies") and len(tail) > 3:
+        tail_variants.add(tail[:-3] + "y")
+    if tail.endswith("es") and len(tail) > 2:
+        tail_variants.add(tail[:-2])
+    if tail.endswith("s") and len(tail) > 1:
+        tail_variants.add(tail[:-1])
+    if not tail.endswith("s"):
+        tail_variants.add(tail + "s")
+    if tail.endswith("y") and len(tail) > 1:
+        tail_variants.add(tail[:-1] + "ies")
+
+    for candidate in tail_variants:
+        rebuilt = " ".join(tokens[:-1] + [candidate]).strip()
+        if rebuilt:
+            variants.add(rebuilt)
+    return variants
+
+
+def _matches_avoidance(text: str, avoid_terms: Iterable[str]) -> bool:
+    normalized_text = re.sub(r"[^a-z0-9\s]+", " ", str(text or "").lower())
+    normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+    if not normalized_text:
+        return False
+
+    for raw_term in avoid_terms:
+        for term in _expand_term_variations(raw_term):
+            if not term:
+                continue
+            if term in normalized_text or normalized_text in term:
+                return True
+    return False
+
+
+def _exclude_user_avoidance(df: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    avoid_terms = _parse_avoidance_terms(profile)
+    if not avoid_terms:
+        return df
+
+    def is_allowed(row: pd.Series) -> bool:
+        text = " ".join(
+            [
+                str(row.get("Exercise Name", "")),
+                str(row.get("Primary Category", "")),
+                str(row.get("Description", "")),
+                str(row.get("Tags", "")),
+                str(row.get("Health benefit", "")),
+                str(row.get("Steps to perform", "")),
+            ]
+        )
+        return not _matches_avoidance(text, avoid_terms)
+
+    return df[df.apply(is_allowed, axis=1)].copy()
+
+
+def _remove_avoided_from_plan(plan: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    avoid_terms = _parse_avoidance_terms(profile)
+    if not isinstance(plan, dict) or not avoid_terms:
+        return plan
+
+    for day in plan.values():
+        if not isinstance(day, dict):
+            continue
+        for section in ("warmup", "main_workout", "cooldown"):
+            cleaned = []
+            for ex in day.get(section, []) or []:
+                name_text = ""
+                if isinstance(ex, dict):
+                    name_text = str(ex.get("name") or ex.get("exercise_name") or "")
+                else:
+                    name_text = str(ex or "")
+                if not _matches_avoidance(name_text, avoid_terms):
+                    cleaned.append(ex)
+            day[section] = cleaned
+
+    return plan
+
+
+@contextmanager
+def _hard_avoidance_dataset_scope(profile: Dict[str, Any]):
+    normalized = _normalize_profile(profile)
+    original_load = legacy_fitness.FitnessDataset.load
+
+    def _patched_load(cls, preferred_path: Optional[str] = None):
+        loaded = original_load(preferred_path=preferred_path)
+        if loaded is None or loaded.empty:
+            return loaded
+        filtered = ExerciseFilter.apply_filters(loaded, normalized)
+        if filtered is None or filtered.empty:
+            filtered = loaded.copy()
+        return _exclude_user_avoidance(filtered, normalized)
+
+    legacy_fitness.FitnessDataset.load = classmethod(_patched_load)
+    try:
+        yield
+    finally:
+        legacy_fitness.FitnessDataset.load = original_load
+
+
 def _postprocess_generated_plan(plan: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
     bodyweight_only = _is_bodyweight_only(_normalize_profile(profile))
     for day_data in (plan or {}).values():
@@ -197,16 +334,28 @@ def generate_plan_local_from_dataset(profile: Dict[str, Any], dataset_path: str,
     old_paths = list(legacy_fitness.FitnessDataset.POSSIBLE_PATHS)
     legacy_fitness.FitnessDataset.POSSIBLE_PATHS = [dataset_path] + old_paths
     try:
-        plan = run_old_engine(profile)
+        normalized = _normalize_profile(profile)
+        df = FitnessDataset.load()
+        df = ExerciseFilter.apply_filters(df, normalized)
+        df = _exclude_user_avoidance(df, normalized)
+        with _hard_avoidance_dataset_scope(normalized):
+            plan = run_old_engine(normalized)
     finally:
         legacy_fitness.FitnessDataset.POSSIBLE_PATHS = old_paths
+    plan = _remove_avoided_from_plan(plan, profile)
     if enrich_video:
         return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
     return _postprocess_generated_plan(plan, profile)
 
 
 def generate_plan_local(profile: Dict[str, Any], *, enrich_video: bool = True) -> Dict[str, Any]:
-    plan = run_old_engine(profile)
+    normalized = _normalize_profile(profile)
+    df = FitnessDataset.load()
+    df = ExerciseFilter.apply_filters(df, normalized)
+    df = _exclude_user_avoidance(df, normalized)
+    with _hard_avoidance_dataset_scope(normalized):
+        plan = run_old_engine(normalized)
+    plan = _remove_avoided_from_plan(plan, profile)
     if enrich_video:
         return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
     return _postprocess_generated_plan(plan, profile)
