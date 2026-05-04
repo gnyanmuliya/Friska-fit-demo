@@ -253,215 +253,86 @@ def _apply_hypertension_guardrail(df: pd.DataFrame, profile: Dict[str, Any]) -> 
     if df is None or df.empty:
         return df
 
-    raw_conditions = profile.get("medical_conditions", "")
-    if isinstance(raw_conditions, (list, tuple, set)):
-        conditions = " ".join(str(item or "") for item in raw_conditions).lower()
-    else:
-        conditions = str(raw_conditions or "").lower()
+    raw_conditions = profile.get("medical_conditions", []) or []
+    if isinstance(raw_conditions, str):
+        raw_conditions = [raw_conditions]
+    conditions = [str(c).lower() for c in raw_conditions]
 
-    if "hypertension" not in conditions:
+    if not any("hypertension" in c or "high blood pressure" in c for c in conditions):
         return df
-
-    patterns = [
-        "plank",
-        "hollow hold",
-        "isometric",
-        "wall sit",
-        "v hold",
-    ]
 
     def is_safe(row: pd.Series) -> bool:
         text = " ".join(
             [
                 str(row.get("Exercise Name", "")),
-                str(row.get("Description", "")),
+                str(row.get("Primary Category", "")),
                 str(row.get("Tags", "")),
+                str(row.get("Description", "")),
             ]
         ).lower()
-        return not any(pattern in text for pattern in patterns)
+        unsafe_keywords = ["plank", "isometric hold", "static hold", "valsalva", "abdominal hold"]
+        return not any(keyword in text for keyword in unsafe_keywords)
 
     return df[df.apply(is_safe, axis=1)].copy()
 
 
-def _boost_selected_equipment(df: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
-    if df is None or df.empty:
+def _boost_equipment_presence(df: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
+    if df is None or df.empty or "Equipments" not in df.columns:
         return df
 
-    equipment = profile.get("available_equipment") or profile.get("equipment") or []
+    equipment = profile.get("available_equipment", []) or profile.get("equipment", []) or []
     if isinstance(equipment, str):
         equipment = [equipment]
-    equipment = [str(item or "").strip().lower() for item in equipment if str(item or "").strip()]
+    equipment = [str(item).lower() for item in equipment if str(item).strip()]
     if not equipment:
         return df
 
-    boosted = df.copy()
+    priority_frames: list[pd.DataFrame] = []
+    for eq in equipment:
+        matched = df[df["Equipments"].astype(str).str.lower().str.contains(eq, na=False)]
+        if not matched.empty:
+            priority_frames.append(matched.sample(frac=0.6, replace=True))
 
-    def score(row: pd.Series) -> int:
-        eq = str(row.get("Equipments", "")).lower()
-        if any(item in eq for item in equipment):
-            return 2
-        return 1
+    if priority_frames:
+        boosted = pd.concat(priority_frames, ignore_index=False)
+        remaining = df.sample(frac=0.4, replace=True)
+        return pd.concat([boosted, remaining], ignore_index=False).drop_duplicates().copy()
 
-    boosted["_equipment_score"] = boosted.apply(score, axis=1)
-    sort_cols = ["_equipment_score"]
-    ascending = [False]
-    if "Exercise Name" in boosted.columns:
-        sort_cols.append("Exercise Name")
-        ascending.append(True)
-    return boosted.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    return df
 
 
-def _enforce_strength_balance(df: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-
-    goal = str(profile.get("primary_goal") or profile.get("goal") or "").lower()
-    if "strength" not in goal and "weight loss" not in goal:
-        return df
-
-    categories = df["Primary Category"] if "Primary Category" in df.columns else pd.Series([""] * len(df), index=df.index)
-    strength_mask = categories.str.contains(r"strength|resistance", case=False, na=False, regex=True)
-    cardio_mask = categories.str.contains(r"cardio|hiit", case=False, na=False, regex=True)
-
-    strength_df = df[strength_mask]
-    cardio_df = df[cardio_mask]
-    if strength_df.empty:
-        return df
-
-    strength_sort_cols = [col for col in ["_equipment_score", "Exercise Name"] if col in strength_df.columns]
-    strength_ascending = [False if col == "_equipment_score" else True for col in strength_sort_cols]
-    cardio_sort_cols = [col for col in ["_equipment_score", "Exercise Name"] if col in cardio_df.columns]
-    cardio_ascending = [False if col == "_equipment_score" else True for col in cardio_sort_cols]
-
-    ordered_strength = strength_df.sort_values(strength_sort_cols, ascending=strength_ascending, kind="mergesort") if strength_sort_cols else strength_df
-    ordered_cardio = cardio_df.sort_values(cardio_sort_cols, ascending=cardio_ascending, kind="mergesort") if cardio_sort_cols else cardio_df
-
-    strength_take = min(len(ordered_strength), 5)
-    cardio_take = min(len(ordered_cardio), 2)
-    selected = [ordered_strength.head(strength_take)]
-    if cardio_take > 0:
-        selected.append(ordered_cardio.head(cardio_take))
-
-    combined = pd.concat(selected)
-    if "Exercise Name" in combined.columns:
-        combined = combined.drop_duplicates(subset=["Exercise Name"], keep="first")
-    else:
-        combined = combined.drop_duplicates(keep="first")
-    return combined
-
-
-def _limit_mobility_overload(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    if "Primary Category" not in df.columns:
-        return df
-
-    category_mask = df["Primary Category"].str.contains("mobility", case=False, na=False)
-    tags = df["Tags"] if "Tags" in df.columns else pd.Series([""] * len(df), index=df.index)
-    main_tag_mask = tags.str.contains("main workout", case=False, na=False)
-    return df[(~category_mask) | main_tag_mask].copy()
-
-
-def _prepare_selection_dataset(df: pd.DataFrame, profile: Dict[str, Any]) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    prepared = ExerciseFilter.apply_filters(df, profile)
-    prepared = _apply_hypertension_guardrail(prepared, profile)
-    prepared = _exclude_user_avoidance(prepared, profile)
-    prepared = _limit_mobility_overload(prepared)
-    prepared = _boost_selected_equipment(prepared, profile)
-    prepared = _enforce_strength_balance(prepared, profile)
-    return prepared
-
-
-def _validate_strength_presence(plan: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(plan, dict):
+def _ensure_strength_presence(plan: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    goal = str(profile.get("primary_goal", "")).lower()
+    if "strength" not in goal and "muscle" not in goal:
         return plan
 
-    fallback_pool = [
-        {"name": "Bodyweight Squat", "sets": 3, "reps": "10-15", "category": "strength"},
-        {"name": "Glute Bridge", "sets": 3, "reps": "10-15", "category": "strength"},
-        {"name": "Incline Push-Up", "sets": 3, "reps": "8-12", "category": "strength"},
-    ]
-
-    def _is_strength(exercise: Any, day_payload: Dict[str, Any]) -> bool:
-        if not isinstance(exercise, dict):
-            return False
-        category_blob = str(exercise.get("category", "")).lower()
-        if re.search(r"strength|resistance|upper|lower", category_blob):
-            return True
-        name = str(exercise.get("name") or exercise.get("exercise_name") or "").lower()
-        return bool(re.search(r"squat|press|row|deadlift|lunge|curl|hinge|bridge|thrust|pull|raise|fly", name))
-
-    for day in plan.values():
+    for day in (plan or {}).values():
         if not isinstance(day, dict):
             continue
-        main = day.get("main_workout", [])
-        if not isinstance(main, list):
-            continue
-        min_strength_per_day = 3
-        strength_count = sum(1 for ex in main if _is_strength(ex, day))
-        pool_index = 0
-        while strength_count < min_strength_per_day and pool_index < len(fallback_pool):
-            main.append(copy.deepcopy(fallback_pool[pool_index]))
-            strength_count += 1
-            pool_index += 1
 
-    return plan
-
-
-def _validate_equipment_presence(plan: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(plan, dict):
-        return plan
-
-    selected = profile.get("available_equipment") or profile.get("equipment") or []
-    if isinstance(selected, str):
-        selected = [selected]
-    selected = [str(item or "").strip() for item in selected if str(item or "").strip()]
-    selected_lower = [item.lower() for item in selected]
-    if not selected_lower:
-        return plan
-
-    for day in plan.values():
-        if not isinstance(day, dict):
-            continue
-        main = day.get("main_workout", [])
-        if not isinstance(main, list):
+        main = day.get("main_workout", []) or []
+        strength_count = sum(
+            1
+            for ex in main
+            if "strength" in str((ex or {}).get("category", "")).lower()
+            or "strength" in str((ex or {}).get("primary_category", "")).lower()
+        )
+        if strength_count >= 3:
             continue
 
-        has_selected_equipment = False
+        additional: list[Dict[str, Any]] = []
         for ex in main:
             if not isinstance(ex, dict):
                 continue
-            name = str(ex.get("name") or ex.get("exercise_name") or "").lower()
-            equipment = str(ex.get("equipment") or "").strip()
-            equipment_l = equipment.lower()
-            if not equipment:
-                if "band" in name:
-                    ex["equipment"] = "Resistance Band"
-                    equipment_l = "resistance band"
-                elif "dumbbell" in name or name.startswith("db "):
-                    ex["equipment"] = "Dumbbell"
-                    equipment_l = "dumbbell"
-                elif "kettlebell" in name:
-                    ex["equipment"] = "Kettlebell"
-                    equipment_l = "kettlebell"
+            category = str(ex.get("category", "") or ex.get("primary_category", "")).lower()
+            if "mobility" in category or "cardio" in category:
+                continue
+            additional.append(copy.deepcopy(ex))
+            if len(additional) >= 2:
+                break
 
-            if any(eq in equipment_l or eq in name for eq in selected_lower):
-                has_selected_equipment = True
-
-        if not has_selected_equipment:
-            preferred = selected[0]
-            fallback_name = "Resistance Band Row" if "band" in preferred.lower() else f"{preferred} Squat"
-            main.append(
-                {
-                    "name": fallback_name,
-                    "sets": 3,
-                    "reps": "10-15",
-                    "category": "strength",
-                    "equipment": preferred,
-                }
-            )
+        if additional:
+            day["main_workout"] = main + additional
 
     return plan
 
@@ -490,21 +361,21 @@ def _remove_avoided_from_plan(plan: Dict[str, Any], profile: Dict[str, Any]) -> 
 
 
 @contextmanager
-def _hard_avoidance_dataset_scope(profile: Dict[str, Any], prepared_df: Optional[pd.DataFrame] = None):
+def _hard_avoidance_dataset_scope(profile: Dict[str, Any]):
     normalized = _normalize_profile(profile)
     original_load = legacy_fitness.FitnessDataset.load
-    curated = prepared_df.copy() if isinstance(prepared_df, pd.DataFrame) else None
 
     def _patched_load(cls, preferred_path: Optional[str] = None):
-        if curated is not None:
-            return curated.copy()
         loaded = original_load(preferred_path=preferred_path)
         if loaded is None or loaded.empty:
             return loaded
-        prepared = _prepare_selection_dataset(loaded, normalized)
-        if prepared is None or prepared.empty:
-            return loaded.copy()
-        return prepared
+        filtered = ExerciseFilter.apply_filters(loaded, normalized)
+        if filtered is None or filtered.empty:
+            filtered = loaded.copy()
+        filtered = _apply_hypertension_guardrail(filtered, normalized)
+        filtered = _exclude_user_avoidance(filtered, normalized)
+        filtered = _boost_equipment_presence(filtered, normalized)
+        return filtered
 
     legacy_fitness.FitnessDataset.load = classmethod(_patched_load)
     try:
@@ -556,36 +427,34 @@ def generate_plan_local_from_dataset(profile: Dict[str, Any], dataset_path: str,
     try:
         normalized = _normalize_profile(profile)
         df = FitnessDataset.load()
-        df = _prepare_selection_dataset(df, normalized)
-        with _hard_avoidance_dataset_scope(normalized, prepared_df=df):
+        df = ExerciseFilter.apply_filters(df, normalized)
+        df = _apply_hypertension_guardrail(df, normalized)
+        df = _exclude_user_avoidance(df, normalized)
+        df = _boost_equipment_presence(df, normalized)
+        with _hard_avoidance_dataset_scope(normalized):
             plan = run_old_engine(normalized)
     finally:
         legacy_fitness.FitnessDataset.POSSIBLE_PATHS = old_paths
     plan = _remove_avoided_from_plan(plan, profile)
-    plan = _validate_strength_presence(plan)
-    plan = _validate_equipment_presence(plan, normalized)
+    plan = _ensure_strength_presence(plan, profile)
     if enrich_video:
-        enriched = VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
-        enriched = _validate_strength_presence(enriched)
-        enriched = _validate_equipment_presence(enriched, normalized)
-        return _postprocess_generated_plan(enriched, profile)
+        return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
     return _postprocess_generated_plan(plan, profile)
 
 
 def generate_plan_local(profile: Dict[str, Any], *, enrich_video: bool = True) -> Dict[str, Any]:
     normalized = _normalize_profile(profile)
     df = FitnessDataset.load()
-    df = _prepare_selection_dataset(df, normalized)
-    with _hard_avoidance_dataset_scope(normalized, prepared_df=df):
+    df = ExerciseFilter.apply_filters(df, normalized)
+    df = _apply_hypertension_guardrail(df, normalized)
+    df = _exclude_user_avoidance(df, normalized)
+    df = _boost_equipment_presence(df, normalized)
+    with _hard_avoidance_dataset_scope(normalized):
         plan = run_old_engine(normalized)
     plan = _remove_avoided_from_plan(plan, profile)
-    plan = _validate_strength_presence(plan)
-    plan = _validate_equipment_presence(plan, normalized)
+    plan = _ensure_strength_presence(plan, profile)
     if enrich_video:
-        enriched = VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan))
-        enriched = _validate_strength_presence(enriched)
-        enriched = _validate_equipment_presence(enriched, normalized)
-        return _postprocess_generated_plan(enriched, profile)
+        return _postprocess_generated_plan(VideoMapper("dataset/Exercise videos.csv").enrich_plan(copy.deepcopy(plan)), profile)
     return _postprocess_generated_plan(plan, profile)
 
 
